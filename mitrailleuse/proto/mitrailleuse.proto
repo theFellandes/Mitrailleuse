@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package mitrailleuse;
+
+service MitrailleuseService {
+  rpc CreateTask (CreateTaskRequest) returns (CreateTaskResponse);
+  rpc ExecuteTask (ExecuteTaskRequest) returns (ExecuteTaskResponse);
+  rpc GetTaskStatus (GetTaskStatusRequest) returns (GetTaskStatusResponse);
+}
+
+message CreateTaskRequest {
+  string user_id = 1;
+  string api_name = 2;
+  string task_name = 3;
+  string config_json = 4;  // raw json of Config
+}
+
+message CreateTaskResponse {
+  string task_folder = 1;
+}
+
+message ExecuteTaskRequest {
+  string user_id = 1;
+  string task_folder = 2;
+}
+
+message ExecuteTaskResponse {
+  string status   = 1;
+  string job_id   = 2;   // empty when not a batch
+}
+
+message GetTaskStatusRequest {
+  string user_id = 1;
+  string task_folder = 2;
+}
+
+message GetTaskStatusResponse {
+  string status = 1;
+}
