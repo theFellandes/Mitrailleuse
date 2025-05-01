@@ -1,8 +1,9 @@
 import logging
 from pathlib import Path
-from mitrailleuse.config.config import Config
+from typing import Optional
 
-def get_logger(name: str, cfg: Config | None = None):
+
+def get_logger(name: str, cfg: Optional['Config'] = None):
     logger = logging.getLogger(name)
     if logger.handlers:  # already configured
         return logger
@@ -14,11 +15,30 @@ def get_logger(name: str, cfg: Config | None = None):
     sh.setFormatter(fmt)
     logger.addHandler(sh)
 
-    if cfg and cfg.general.logs.log_to_file:
-        path = Path(cfg.general.logs.log_file)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fh = logging.FileHandler(path)
-        fh.setFormatter(fmt)
-        logger.addHandler(fh)
+    # Try to configure file logging if config is provided
+    if cfg is not None:
+        try:
+            # Handle different config access patterns
+            log_to_file = False
+            log_file = "mitrailleuse.log"
+
+            # Try object-style access first
+            if hasattr(cfg, 'general') and hasattr(cfg.general, 'logs'):
+                log_to_file = getattr(cfg.general.logs, 'log_to_file', False)
+                log_file = getattr(cfg.general.logs, 'log_file', log_file)
+            # Fall back to dict-style access
+            elif isinstance(cfg, dict) and 'general' in cfg and 'logs' in cfg['general']:
+                log_to_file = cfg['general']['logs'].get('log_to_file', False)
+                log_file = cfg['general']['logs'].get('log_file', log_file)
+
+            if log_to_file:
+                path = Path(log_file)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                fh = logging.FileHandler(path)
+                fh.setFormatter(fmt)
+                logger.addHandler(fh)
+        except Exception as e:
+            # Don't let logging configuration errors break the application
+            print(f"Warning: Could not configure file logging: {str(e)}")
 
     return logger

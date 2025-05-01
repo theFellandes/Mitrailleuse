@@ -12,6 +12,18 @@ from mitrailleuse.infrastructure.adapters.openai_adapter import OpenAIAdapter
 channel   = grpc.insecure_channel("localhost:50051")
 stub      = mitrailleuse_pb2_grpc.MitrailleuseServiceStub(channel)
 
+
+# 2) prep helper + values ---------------------------------------------------
+def _s(obj):           # cast Path → str, leave str unchanged
+    return str(obj) if isinstance(obj, Path) else obj
+
+
+user_id   = "owx123456"
+task_dir  = Path(
+    r"D:\Programming\Python\Mitrailleuse\mitrailleuse\tasks"
+    r"\owx123456\openai_few_shot_demo_01_05_2025_131432"
+)
+
 # ------------------------------------------------------------------ 1) create task
 base_cfg  = json.loads(Path("mitrailleuse/config/config.json").read_text())
 
@@ -29,7 +41,7 @@ print("✅ task created at", task_dir)
 # ------------------------------------------------------------------ 2) dynamic override
 override_cfg          = copy.deepcopy(base_cfg)
 override_cfg["general"]["multiprocessing_enabled"] = False    # single-proc
-override_cfg["openai"]["batch"]["is_batch_active"] = True     # force batch
+override_cfg["openai"]["batch"]["is_batch_active"] = False     # force batch
 
 # we *re-use* the same task folder, so server will just update config.json
 stub.ExecuteTask.future  # we’ll call it later, after dropping inputs
@@ -39,22 +51,28 @@ print("🔁  wrote overridden config into", task_dir / "config" / "config.json")
 
 # ------------------------------------------------------------------ drop a couple of JSON inputs
 sample_req = {
-    "model": "gpt-4o",
-    "messages": [
-        {"role": "user", "content": "Say hello from the Mitrailleuse demo"}
-    ]
+    "instruction": "You are a helpful assistant",
+    "user_prompt": "Say hello from the Mitrailleuse demo"
 }
 for i in range(3):
     (task_dir / "inputs" / f"input_{i}.json").write_text(json.dumps(sample_req))
 
-# ------------------------------------------------------------------ 3) run batch request
+# 3) **THIS is the block you asked about** ----------------------------------
 exec_rsp = stub.ExecuteTask(
     mitrailleuse_pb2.ExecuteTaskRequest(
-        user_id     = "alice",
-        task_folder = str(task_dir)
+        user_id    = str(user_id),            # **always cast to str**
+        task_folder= str(task_dir)            # idem – Path → str
     )
 )
-print("⚙️  execution kicked off – server returned status:", exec_rsp.status)
+
+# 4) handle the response ----------------------------------------------------
+if exec_rsp.status == "failed":
+    print("🚨 task failed – see log:",
+          task_dir / "logs" / "log.log")
+elif exec_rsp.job_id:
+    print("📡 batch launched – id:", exec_rsp.job_id)
+else:
+    print("✅ single-request task finished")
 
 # grab the persisted batch id
 batch_job_file = task_dir / "cache" / "batch_job.json"

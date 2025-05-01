@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-import mitrailleuse_pb2 as mitrailleuse__pb2
+from . import mitrailleuse_pb2 as mitrailleuse__pb2
 
 GRPC_GENERATED_VERSION = '1.71.0'
 GRPC_VERSION = grpc.__version__

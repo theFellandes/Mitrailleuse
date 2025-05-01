@@ -23,7 +23,7 @@
     "bulk_save": 10,
     "sleep_time": 0,
     "proxies": {
-      "proxies_enabled": true,
+      "proxies_enabled": false,
       "http": "http://corporate-proxy:8080/",
       "https": "http://corporate-proxy:8080/"
     }
