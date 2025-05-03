@@ -4,12 +4,14 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 from typing import Optional
 
+
 class TaskStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
     SUCCESS = "success"
     FAILED = "failed"
-          # <- add
+    # <- add
+
 
 class Task(BaseModel):
     user_id: str

@@ -7,9 +7,9 @@ from grpc_reflection.v1alpha import reflection
 
 from mitrailleuse import mitrailleuse_pb2, mitrailleuse_pb2_grpc
 from mitrailleuse.application.services.task_service import TaskService
-from mitrailleuse.application.services.request_service import RequestService
-from mitrailleuse.infrastructure.adapters.openai_adapter import OpenAIAdapter
+from mitrailleuse.application.services.request_service import RequestService, ADAPTERS
 from mitrailleuse.infrastructure.adapters.file_cache_adapter import FileCache
+from mitrailleuse.infrastructure.adapters.openai_adapter import OpenAIAdapter
 from mitrailleuse.infrastructure.logging.logger import get_logger
 from mitrailleuse.infrastructure.settings import TASK_ROOT
 from mitrailleuse.config.config import Config
@@ -22,27 +22,30 @@ class MitrailleuseGRPC(mitrailleuse_pb2_grpc.MitrailleuseServiceServicer):
 
     def CreateTask(self, request, context):
         try:
-            # Postman may send config_json as a Struct (dict) or raw str
-            if isinstance(request.config_json, str) and request.config_json.strip():
-                cfg_dict = json.loads(request.config_json)
-            else:
-                # When Postman sends an object, it's already a dict‑like
-                cfg_dict = json.loads(json.dumps(request.config_json))
-
+            # Postman can send either a raw JSON string or a Struct‑like object
+            cfg_dict = (json.loads(request.config_json)
+                        if isinstance(request.config_json, str)
+                        else json.loads(json.dumps(request.config_json)))
             cfg = Config.model_validate(cfg_dict)
-            task = TaskService.create_task(request.user_id, request.api_name,
-                                         request.task_name, cfg)
+
+            task = TaskService.create_task(
+                request.user_id,
+                request.api_name.lower(),  # ← persist provider name
+                request.task_name,
+                cfg
+            )
             return mitrailleuse_pb2.CreateTaskResponse(
                 task_folder=str(task.path(TASK_ROOT))
             )
         except ValueError as exc:
-            context.set_details(str(exc))
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-        except Exception as exc:
-            log.error(f"Task creation failed: {str(exc)}")
             context.set_details(str(exc))
+        except Exception as exc:
+            log.error("Task creation failed: %s", exc)
             context.set_code(grpc.StatusCode.INTERNAL)
-        return mitrailleuse_pb2.ExecuteTaskResponse(status="failed", job_id="")
+            context.set_details(str(exc))
+        # ALWAYS return the right message type
+        return mitrailleuse_pb2.CreateTaskResponse(task_folder="")
 
     def ExecuteTask(self, request, context):
         base_path = Path(request.task_folder)
@@ -67,11 +70,16 @@ class MitrailleuseGRPC(mitrailleuse_pb2_grpc.MitrailleuseServiceServicer):
 
             cfg = Config.read(config_path)
             cache = FileCache(base_path / "cache")
-            api = OpenAIAdapter(cfg)
             task = TaskService.status_from_path(base_path)
 
-            # Create services and execute
+            # 2️⃣  choose adapter
+            provider = (task.api_name or "openai").lower()
+            adapter = ADAPTERS.get(provider, OpenAIAdapter)
+            api = adapter(cfg)
+
+            # 3️⃣  fire the RequestService
             job_id = RequestService(api, cache, cfg).execute(task, base_path)
+
             return mitrailleuse_pb2.ExecuteTaskResponse(
                 status=task.status.value,
                 job_id=job_id or ""

@@ -9,8 +9,8 @@ from mitrailleuse.infrastructure.logging.logger import get_logger
 from mitrailleuse.infrastructure.settings import TASK_ROOT, REPO_ROOT, TEMPLATE_CONFIG
 
 # *****  choose a project-wide tasks root you like *****
-PROJECT_ROOT = Path(__file__).resolve().parents[2]      # repo root
-TASK_ROOT    = PROJECT_ROOT / "tasks"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]  # repo root
+TASK_ROOT = PROJECT_ROOT / "tasks"
 
 log = get_logger(__name__)
 

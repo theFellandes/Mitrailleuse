@@ -1,6 +1,7 @@
 from functools import wraps
 import time
 
+
 def circuit(max_failures: int = 3, reset_timeout: int = 60):
     def decorator(fn):
         failures = 0
@@ -21,5 +22,7 @@ def circuit(max_failures: int = 3, reset_timeout: int = 60):
                 if failures >= max_failures:
                     opened_at = time.time()
                 raise e
+
         return wrapper
+
     return decorator
