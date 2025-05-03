@@ -9,6 +9,8 @@ from __future__ import annotations
 import os, httpx, logging, json, pathlib
 from typing import List, Dict, Any
 
+from mitrailleuse.infrastructure.utils.circuit_breaker import circuit
+
 
 class DeepSeekAdapter:
     BASE_URL   = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
@@ -39,6 +41,7 @@ class DeepSeekAdapter:
         }
 
     # ───────────────────────── chat completions ─────────────────
+    @circuit()
     def send_single(self, body: Dict[str, Any]) -> Dict[str, Any]:
         url = f"{self.BASE_URL}{self.ENDPOINT}"
         with httpx.Client(timeout=self.TIMEOUT, http2=True) as client:

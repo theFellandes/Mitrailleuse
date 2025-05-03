@@ -9,6 +9,8 @@ from __future__ import annotations
 import os, httpx, logging
 from typing import Dict, Any, List
 
+from mitrailleuse.infrastructure.utils.circuit_breaker import circuit
+
 
 class DeepLAdapter:
     BASE_URL = os.getenv("DEEPL_BASE_URL", "https://api.deepl.com/v2")
@@ -56,6 +58,7 @@ class DeepLAdapter:
             "target_lang": lang_val.upper(),    # must be uppercase code:contentReference[oaicite:2]{index=2}
         }
 
+    @circuit()
     def send_single(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         body = self.build_body(payload)
         url  = f"{self.BASE_URL}{self.ENDPOINT}"
