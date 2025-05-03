@@ -38,17 +38,6 @@ create_rsp = stub.CreateTask(
 task_dir = Path(create_rsp.task_folder)
 print("✅ task created at", task_dir)
 
-# ------------------------------------------------------------------ 2) dynamic override
-override_cfg          = copy.deepcopy(base_cfg)
-override_cfg["general"]["multiprocessing_enabled"] = False    # single-proc
-override_cfg["openai"]["batch"]["is_batch_active"] = False     # force batch
-
-# we *re-use* the same task folder, so server will just update config.json
-stub.ExecuteTask.future  # we’ll call it later, after dropping inputs
-
-(task_dir / "config" / "config.json").write_text(json.dumps(override_cfg, indent=2))
-print("🔁  wrote overridden config into", task_dir / "config" / "config.json")
-
 # ------------------------------------------------------------------ drop a couple of JSON inputs
 sample_req = {
     "instruction": "You are a helpful assistant",
@@ -79,7 +68,7 @@ batch_job_file = task_dir / "cache" / "batch_job.json"
 job_id         = json.loads(batch_job_file.read_text())["id"]
 
 # ------------------------------------------------------------------ 4) poll batch status
-adapter = OpenAIAdapter(Config(**override_cfg))
+adapter = OpenAIAdapter(base_cfg)
 while True:
     status = adapter.get_batch_status(job_id)
     print("📡  batch state:", status["status"])

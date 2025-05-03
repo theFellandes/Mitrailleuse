@@ -4,6 +4,8 @@ from typing import Dict
 from pathlib import Path
 from pydantic import BaseModel
 
+from mitrailleuse.config.deepl_config import DeeplConfig
+from mitrailleuse.config.deepseek_config import DeepseekConfig
 from mitrailleuse.config.openai_config import OpenAIConfig
 
 
@@ -37,6 +39,8 @@ class GeneralConfig(BaseModel):
 class Config(BaseModel):
     task_name: str
     openai: OpenAIConfig
+    deepseek: DeepseekConfig
+    deepl: DeeplConfig
     general: GeneralConfig
 
     def deep_update(self, base_dict: Dict, update_dict: Dict) -> Dict:

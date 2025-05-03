@@ -163,5 +163,7 @@ tutorial_notebook.ipynb
 /tutorial_notebook.ipynb
 /.cache/
 mitrailleuse/config/config.json
-/mitrailleuse/tasks/owx123456/openai_few_shot_demo_01_05_2025_140801/config/config.json
+/mitrailleuse/tasks/owx123456/correct/openai_few_shot_demo_01_05_2025_140801/config/config.json
 /mitrailleuse/tasks/owx123456/
+/a.txt
+/mitrailleuse/infrastructure/grpc/temp_batch_files/

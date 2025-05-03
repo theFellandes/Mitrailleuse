@@ -3,7 +3,7 @@
 
   "openai": {
     "batch": {
-      "is_batch_active": false,
+      "is_batch_active": true,
       "batch_check_time": 120,
       "batch_size": 20
     },
@@ -27,6 +27,40 @@
       "http": "http://corporate-proxy:8080/",
       "https": "http://corporate-proxy:8080/"
     }
+  },
+
+  "deepseek": {
+    "batch": {
+      "is_batch_active": true,
+      "batch_check_time": 120,
+      "batch_size": 20
+    },
+    "prompt": "input_text",
+    "system_instruction": {
+      "is_dynamic": false,
+      "system_prompt": ""
+    },
+    "api_key": "",
+    "api_information": {
+      "model": "gpt-4o",
+      "setting": {
+        "temperature": 1.0,
+        "max_tokens": 16000
+      }
+    },
+    "bulk_save": 10,
+    "sleep_time": 0,
+    "proxies": {
+      "proxies_enabled": false,
+      "http": "http://corporate-proxy:8080/",
+      "https": "http://corporate-proxy:8080/"
+    }
+  },
+
+  "deepl": {
+    "api_key": "",
+    "target_lang": "target_lang",
+    "text": "text"
   },
 
   "general": {

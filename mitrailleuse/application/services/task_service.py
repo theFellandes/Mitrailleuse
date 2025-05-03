@@ -38,10 +38,9 @@ class TaskService:
         if isinstance(cfg, Config):
             # ── live copy (deep-clone dict ➜ update task_name) ───────────────────
             try:
-                live_cfg = cfg.update({"task_name": task.task_name})
+                live_cfg = cfg.copy(update={"task_name": task.task_name})
                 config_path = base_path / "config" / "config.json"
-                config_path = base_path / "config" / "config.json"
-                Config.write(live_cfg, config_path)
+                Config.write(live_cfg, base_path / "config" / "config.json")
                 log.info(f"Saved task config to {config_path}")
             except Exception as e:
                 log.error(f"Failed to save config: {str(e)}")

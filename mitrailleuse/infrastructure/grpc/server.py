@@ -2,6 +2,8 @@ import json
 import grpc
 from concurrent import futures
 from pathlib import Path
+from grpc_health.v1 import health, health_pb2, health_pb2_grpc
+from grpc_reflection.v1alpha import reflection
 
 from mitrailleuse import mitrailleuse_pb2, mitrailleuse_pb2_grpc
 from mitrailleuse.application.services.task_service import TaskService
@@ -20,17 +22,27 @@ class MitrailleuseGRPC(mitrailleuse_pb2_grpc.MitrailleuseServiceServicer):
 
     def CreateTask(self, request, context):
         try:
-            cfg = Config.model_validate(json.loads(request.config_json))
+            # Postman may send config_json as a Struct (dict) or raw str
+            if isinstance(request.config_json, str) and request.config_json.strip():
+                cfg_dict = json.loads(request.config_json)
+            else:
+                # When Postman sends an object, it's already a dict‑like
+                cfg_dict = json.loads(json.dumps(request.config_json))
+
+            cfg = Config.model_validate(cfg_dict)
             task = TaskService.create_task(request.user_id, request.api_name,
                                          request.task_name, cfg)
             return mitrailleuse_pb2.CreateTaskResponse(
                 task_folder=str(task.path(TASK_ROOT))
             )
+        except ValueError as exc:
+            context.set_details(str(exc))
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
         except Exception as exc:
             log.error(f"Task creation failed: {str(exc)}")
             context.set_details(str(exc))
             context.set_code(grpc.StatusCode.INTERNAL)
-            return mitrailleuse_pb2.CreateTaskResponse(task_folder="")
+        return mitrailleuse_pb2.ExecuteTaskResponse(status="failed", job_id="")
 
     def ExecuteTask(self, request, context):
         base_path = Path(request.task_folder)
@@ -92,6 +104,19 @@ def serve():
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     mitrailleuse_pb2_grpc.add_MitrailleuseServiceServicer_to_server(
         MitrailleuseGRPC(), server)
+    # ---- Health service ----
+    health_servicer = health.HealthServicer()
+    health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
+    # Mark all services as SERVING
+    health_servicer.set('', health_pb2.HealthCheckResponse.SERVING)
+
+    # ---- Reflection ----
+    SERVICE_NAMES = (
+        mitrailleuse_pb2.DESCRIPTOR.services_by_name['MitrailleuseService'].full_name,
+        health.SERVICE_NAME,
+        reflection.SERVICE_NAME,
+    )
+    reflection.enable_server_reflection(SERVICE_NAMES, server)
     server.add_insecure_port("[::]:50051")
     log.info("Server started on port 50051")
     server.start()

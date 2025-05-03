@@ -1,35 +1,36 @@
-from pydantic import BaseModel
 from typing import Dict, Any
 
+from pydantic import BaseModel
 
-class OpenAIBatch(BaseModel):
+
+class DeepseekBatch(BaseModel):
     is_batch_active: bool
     batch_check_time: int
     batch_size: int
 
 
-class OpenAISetting(BaseModel):
+class DeepseekSetting(BaseModel):
     temperature: float
     max_tokens: int
 
 
-class OpenAIAPIInfo(BaseModel):
+class DeepseekAPIInfo(BaseModel):
     model: str
-    setting: OpenAISetting
+    setting: DeepseekSetting
 
 
-class OpenAIProxies(BaseModel):
+class DeepseekProxies(BaseModel):
     proxies_enabled: bool
     http: str
     https: str
 
 
-class OpenAIConfig(BaseModel):
-    batch: OpenAIBatch
+class DeepseekConfig(BaseModel):
+    batch: DeepseekBatch
     prompt: str
     system_instruction: Dict[str, Any]
     api_key: str
-    api_information: OpenAIAPIInfo
+    api_information: DeepseekAPIInfo
     bulk_save: int
     sleep_time: int
-    proxies: OpenAIProxies
+    proxies: DeepseekProxies
