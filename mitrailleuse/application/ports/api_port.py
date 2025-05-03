@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Iterable, Any
 
+
 class APIPort(ABC):
     """Outbound port for any external API."""
 
