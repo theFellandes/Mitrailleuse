@@ -1,23 +1,25 @@
-# mitrailleuse/application/services/request_service.py
-import json, threading, time, math, datetime as dt, random
+import datetime as dt
+import json
+import math
+import random
+import threading
+import time
 import uuid
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import List
 
 from .task_service import TaskService
+from ... import mitrailleuse_pb2
 from ...application.ports.api_port import APIPort
 from ...application.ports.cache_port import CachePort
-from ...domain.models import Task, TaskStatus
 from ...config.config import Config
+from ...domain.models import Task, TaskStatus
 from ...infrastructure.adapters.deepl_adapter import DeepLAdapter
 from ...infrastructure.adapters.deepseek_adapter import DeepSeekAdapter
 from ...infrastructure.adapters.file_cache_adapter import FileCache
 from ...infrastructure.adapters.openai_adapter import OpenAIAdapter
-from ...infrastructure.utils.mp_pool import pick_num_processes
 from ...infrastructure.logging.logger import get_logger
-from ...infrastructure.settings import TASK_ROOT
-from ... import mitrailleuse_pb2
+from ...infrastructure.utils.mp_pool import pick_num_processes
 
 log = get_logger(__name__)
 
@@ -182,8 +184,6 @@ class RequestService:
                 # 1) persist job‑meta
                 cache_file = base_path / "cache" / "batch_job.json"
                 cache_file.write_text(json.dumps(job_obj, indent=2))
-
-
 
                 # Start the tracking thread
                 tracking_thread = threading.Thread(

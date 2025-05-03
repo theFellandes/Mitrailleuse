@@ -54,7 +54,7 @@ class DeepLAdapter:
                 f"(keys: {self.text_key}, {self.lang_key})"
             )
         return {
-            "text":        [text_val],          # may send up to 50 items:contentReference[oaicite:1]{index=1}
+            "text":        [text_val],          # may send up to 50 items:contentReference[oaicite:1]{index=1}
             "target_lang": lang_val.upper(),    # must be uppercase code:contentReference[oaicite:2]{index=2}
         }
 
