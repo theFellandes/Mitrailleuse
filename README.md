@@ -24,7 +24,7 @@
 
 ```bash
 # clone
- git clone https://github.com/your‑org/mitrailleuse.git
+ git clone https://github.com/theFellandes/mitrailleuse.git
  cd mitrailleuse
 
 # build the gRPC server image
