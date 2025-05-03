@@ -2,6 +2,7 @@
 
 > **Multi‑provider AI request launcher & batch‑runner** supporting **OpenAI**, **DeepSeek**, and **DeepL**, with a gRPC façade, Dockerised runtime, and sampling‑aware task folders.
 
+> Mitrailleuse is an extensible micro‑service that orchestrates high‑throughput requests to multiple generative‑AI providers (OpenAI, DeepSeek, DeepL) while providing a consistent gRPC interface, pluggable adapters, dynamic prompt mapping, and first‑class batch support.
 ---
 
 ## ✨ Key features
@@ -18,7 +19,45 @@
 
 ---
 
+## 🏗️ Architecture
+```
+           +------------------------------+
+           |           Clients            |
+           |  (Postman, grpcurl, CLI)     |
+           +------------------------------+
+                        │ gRPC
+                        ▼
+           +------------------------------+
+           |  Mitrailleuse gRPC Server    |
+           |  • Health + Reflection       |
+           |  • RequestService            |
+           +-------------┬----------------+
+                         │ chooses adapter
+           ┌─────────────┴───────────────┐
+           │                             │
++------------------+         +------------------+
+|  OpenAIAdapter   |         | DeepSeekAdapter  |
+|  – batch + chat  |         |  – chat          |
++------------------+         +------------------+
+           │                             │
+           └─────────────┬───────────────┘
+                         │
+               +------------------+
+               |  DeepLAdapter    |
+               |  – translate     |
+               +------------------+
+```
+
+
 ## 🏁 Quick start
+
+### Prerequisites
+
+* Python 3.12+
+
+* Docker 24.x (optional but recommended)
+
+* Provider API keys in config.json
 
 ### 1 · Clone & build
 
