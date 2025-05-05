@@ -40,15 +40,35 @@ class RequestService:
         self.config = config
 
     # ---------------------------------------------------------- helpers
+
+    @staticmethod
+    def _language_from_filename(p: Path) -> str:
+        """
+        Detect 2‑letter language code at the start of 'en_input_file.json'.
+        Returns 'en' if nothing matches.
+        """
+        prefix = p.stem.split("_", 1)[0]  # first chunk before underscore
+        return prefix.lower() if (len(prefix) == 2 and prefix.isalpha()) else "en"
+
+    def _result_filename(self, input_file: Path, task_name: str, size: int) -> str:
+        lang = self._language_from_filename(input_file)
+        return f"{lang}_{task_name}_{size}.jsonl"
+
     def _send_single(self, file_path: Path):
         user_payload = json.loads(file_path.read_text())
+
+        # Choose provider‑specific body
         if isinstance(self.api, DeepLAdapter):
-            body_or_payload = user_payload  # DeepLAdapter will map
-        else:  # OpenAI or DeepSeek
+            body_or_payload = user_payload  # DeepL maps internally
+        else:
             body_or_payload = self._build_openai_body(user_payload)
 
         log.info(f"Sending request for {file_path.name}")
-        return file_path.name, self.api.send_single(body_or_payload)
+        response = self.api.send_single(body_or_payload)
+
+        # Return both the path and response; the parent process will
+        # write the file to disk to avoid path‑scope issues inside workers.
+        return file_path, response
 
     @staticmethod
     def _build_jsonl_file(payloads: list[dict], base: Path) -> Path:
@@ -128,7 +148,16 @@ class RequestService:
                             try:
                                 log_f.write("Attempting to download batch results...\n")
                                 result_file = self.api.download_batch_results(job_obj["id"], outputs_path)
-                                log_f.write(f"Results downloaded to {result_file}\n")
+
+                                # rename per convention
+                                size = sum(1 for _ in Path(result_file).open("r", encoding="utf-8"))
+                                new_name = self._result_filename(
+                                    Path(result_file),  # language from file prefix
+                                    self.task.task_name,
+                                    size
+                                )
+                                Path(result_file).rename(outputs_path / new_name)
+                                log_f.write(f"Results saved to {new_name}\n")
                             except Exception as dl_err:
                                 log_f.write(f"Failed to download results: {dl_err}\n")
 
@@ -215,10 +244,11 @@ class RequestService:
                 for fut in as_completed(futures):
                     try:
                         fname, resp = fut.result()
-                        self.cache.set(fname, resp)
-                        output_file = outputs_path / f"resp_{fname}"
+                        self.cache.set(fname.name, resp)
+                        out_name = self._result_filename(fname, task.task_name, 1)
+                        output_file = outputs_path / out_name
                         output_file.write_text(json.dumps(resp, indent=2))
-                        log.info(f"Saved response for {fname} to {output_file}")
+                        log.info("Saved response for %s → %s", fname.name, out_name)
                     except Exception as e:
                         log.error(f"Error processing request: {str(e)}")
                         task.status = TaskStatus.FAILED
