@@ -180,7 +180,7 @@ class OpenAIAdapter(APIPort):
             log.error(f"Failed to get batch status: {str(e)}")
             raise
 
-    def download_batch_results(self, job_id: str, output_dir: Path) -> Path:
+    def download_batch_results(self, job_id: str, output_dir: Path, task_name: str) -> Path:
         """Download the results of a completed batch job."""
         log.info(f"Downloading results for batch job: {job_id}")
         try:
@@ -209,12 +209,15 @@ class OpenAIAdapter(APIPort):
             )
             response.raise_for_status()
 
-            # 3. Save to file
-            output_dir.mkdir(parents=True, exist_ok=True)
-            output_path = output_dir / f"batch_results_{job_id}.jsonl"
-            output_path.write_bytes(response.content)
+            # 3. Count lines → "<task>_<n>.jsonl"
+            content_bytes = response.content
+            line_count = len(content_bytes.splitlines())
 
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_path = output_dir / f"{task_name}_{line_count}.jsonl"
+            output_path.write_bytes(content_bytes)
             log.info(f"Batch results saved to {output_path}")
+
             return output_path
 
         except Exception as e:

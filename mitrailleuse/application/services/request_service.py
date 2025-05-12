@@ -39,6 +39,24 @@ class RequestService:
         self.cache = cache
         self.config = config
 
+        # ── derive the task-name once, for all filenames ───────────────────
+        # preferred: explicit field in Config
+        self.task_name: str | None = getattr(config, "task_name", None)
+
+        # fallback ① – nested under ".task.task_name"
+        if not self.task_name:
+            self.task_name = (
+                getattr(config, "task", {}).get("task_name", None)
+                if isinstance(getattr(config, "task", None), dict)
+                else None
+            )
+
+        # fallback ② – last segment of the working-directory path
+        if not self.task_name:
+            # assume Config has a "workdir" or similar path attribute
+            workdir = Path(getattr(config, "workdir", ".")).resolve()
+            self.task_name = workdir.name.split("_", 1)[0] or "task"
+
     # ---------------------------------------------------------- helpers
 
     @staticmethod
@@ -51,8 +69,19 @@ class RequestService:
         return prefix.lower() if (len(prefix) == 2 and prefix.isalpha()) else "en"
 
     def _result_filename(self, input_file: Path, task_name: str, size: int) -> str:
-        lang = self._language_from_filename(input_file)
-        return f"{lang}_{task_name}_{size}.jsonl"
+        """
+        Build a unique output name for **single-shot** requests:
+
+            <lang>_<task>_<input-stem>_<size>.jsonl
+
+        • lang        → first token of the input file (defaults to 'en')
+        • task        → taken from config / function arg
+        • input-stem  → 'input_2' from  'input_2.json'
+        • size        → object count (1 here, but keep for symmetry)
+        """
+        lang = self._language_from_filename(input_file)  # defaults to 'en'
+        stem = input_file.stem  # e.g. 'input_2'
+        return f"{lang}_{task_name}_{stem}_{size}.jsonl"
 
     def _send_single(self, file_path: Path):
         user_payload = json.loads(file_path.read_text())
@@ -78,7 +107,32 @@ class RequestService:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
         return jsonl_path
 
-    def _track_batch_job(self, job_obj, base_path):
+    @staticmethod
+    def _jsonl_to_json_array(path: Path) -> Path:
+        """
+        Convert *.jsonl → *.jsonl where the content is a single JSON list.
+        Returns the same path so caller code needs no changes.
+        """
+        tmp_lines = []
+        with path.open("r", encoding="utf-8") as fin:
+            for line in fin:
+                line = line.strip()
+                if line:                       # skip blank lines
+                    tmp_lines.append(json.loads(line))
+        # overwrite in-place with the wrapped list
+        path.write_text(json.dumps(tmp_lines, ensure_ascii=False, indent=2))
+        return path
+
+    @staticmethod
+    def _count_items(fp: Path) -> int:
+        with fp.open("r", encoding="utf-8") as f:
+            first_char = f.read(1)
+            f.seek(0)
+            if first_char == "[":
+                return len(json.load(f))  # wrapped list
+            return sum(1 for _ in f)  # plain JSONL
+
+    def _track_batch_job(self, job_obj, base_path, task_name: str):
         """Track batch job status in a daemon thread."""
         interval = self._get_batch_check_time(self.config)
         log_file_path = base_path / "logs" / "batch.log"
@@ -146,18 +200,27 @@ class RequestService:
                         # If completed successfully, try to download results
                         if status.get("status") == "completed":
                             try:
-                                log_f.write("Attempting to download batch results...\n")
-                                result_file = self.api.download_batch_results(job_obj["id"], outputs_path)
 
-                                # rename per convention
-                                size = sum(1 for _ in Path(result_file).open("r", encoding="utf-8"))
-                                new_name = self._result_filename(
-                                    Path(result_file),  # language from file prefix
-                                    self.task.task_name,
-                                    size
+                                log_f.write("Attempting to download batch results...\n")
+                                result_path: Path = self.api.download_batch_results(
+                                    job_obj["id"], outputs_path, task_name
                                 )
-                                Path(result_file).rename(outputs_path / new_name)
-                                log_f.write(f"Results saved to {new_name}\n")
+
+                                # 🔄  Convert JSON-Lines → single JSON list
+                                self._jsonl_to_json_array(result_path)
+
+                                # 📏  Count items and rename:  <task>_<n>.jsonl
+                                size = self._count_items(result_path)
+
+                                final_name = f"{task_name}_{size}.jsonl"
+                                final_path = result_path.with_name(final_name)
+
+                                if final_path != result_path:
+                                    result_path.rename(final_path)
+
+                                msg = f"Batch results saved to {final_path} ({size} items)"
+                                log_f.write(msg + "\n")
+                                log.info(msg)
                             except Exception as dl_err:
                                 log_f.write(f"Failed to download results: {dl_err}\n")
 
@@ -217,7 +280,7 @@ class RequestService:
                 # Start the tracking thread
                 tracking_thread = threading.Thread(
                     target=self._track_batch_job,
-                    args=(job_obj, base_path),
+                    args=(job_obj, base_path, self.task_name),  # ← always filled
                     daemon=True
                 )
                 tracking_thread.start()
@@ -245,7 +308,7 @@ class RequestService:
                     try:
                         fname, resp = fut.result()
                         self.cache.set(fname.name, resp)
-                        out_name = self._result_filename(fname, task.task_name, 1)
+                        out_name = self._result_filename(fname, self.task_name, 1)
                         output_file = outputs_path / out_name
                         output_file.write_text(json.dumps(resp, indent=2))
                         log.info("Saved response for %s → %s", fname.name, out_name)
