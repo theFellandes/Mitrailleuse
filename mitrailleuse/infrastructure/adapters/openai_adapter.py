@@ -161,49 +161,46 @@ class OpenAIAdapter(APIPort):
                     }
                     
                     f.write(json.dumps(request) + '\n')
-
+            
             # Upload input file
             with open(temp_file, 'rb') as f:
                 input_file = await self.client.files.create(
                     file=f,
                     purpose='batch'
                 )
-
-            # Clean up temporary file
-            temp_file.unlink()
-
+            
             # Create batch job
-            batch_request = {
-                "input_file_id": input_file.id,
-                "endpoint": "/v1/chat/completions",
-                "completion_window": "24h",
-                "metadata": {
-                    "description": f"Batch processing for {file_path.name}"
-                }
-            }
-
-            batch_job = await self.client.batches.create(**batch_request)
-
+            batch_job = await self.client.batches.create(
+                input_file_id=input_file.id,
+                endpoint="/v1/chat/completions",
+                completion_window=self.config["openai"]["batch"]["completion_window"]
+            )
+            
             # Wait for processing
             while True:
                 status = await self.client.batches.retrieve(batch_job.id)
                 if status.status in ['completed', 'failed', 'expired', 'cancelled']:
                     break
                 await asyncio.sleep(self.config["openai"]["batch"]["batch_check_time"])
-
-            # Get results if completed
+            
+            # Get results
             if status.status == 'completed':
                 results = await self.client.batches.retrieve(batch_job.id)
                 output_file_id = results.output_file_id
+                
+                # Download results
                 output_file = await self.client.files.content(output_file_id)
                 
-                # Parse results
+                # Handle binary response
                 try:
+                    # First try to decode as text
                     content = output_file.text
                     try:
-                        return json.loads(content)
+                        # Try to parse as JSON
+                        batch_results = json.loads(content)
                     except json.JSONDecodeError:
-                        return {
+                        # If not JSON, wrap in expected format
+                        batch_results = {
                             "choices": [
                                 {
                                     "message": {
@@ -213,12 +210,13 @@ class OpenAIAdapter(APIPort):
                             ]
                         }
                 except Exception as e:
+                    # If text decoding fails, try to handle as binary
                     try:
                         content = output_file.content.decode('utf-8')
                         try:
-                            return json.loads(content)
+                            batch_results = json.loads(content)
                         except json.JSONDecodeError:
-                            return {
+                            batch_results = {
                                 "choices": [
                                     {
                                         "message": {
@@ -228,8 +226,8 @@ class OpenAIAdapter(APIPort):
                                 ]
                             }
                     except Exception as decode_error:
-                        log.error(f"Error decoding batch response: {str(decode_error)}")
-                        return {
+                        log.error(f"Error decoding binary response: {str(decode_error)}")
+                        batch_results = {
                             "choices": [
                                 {
                                     "message": {
@@ -239,7 +237,7 @@ class OpenAIAdapter(APIPort):
                             ]
                         }
             else:
-                return {
+                batch_results = {
                     "choices": [
                         {
                             "message": {
@@ -248,6 +246,12 @@ class OpenAIAdapter(APIPort):
                         }
                     ]
                 }
+            
+            # Clean up temporary file
+            if temp_file.exists():
+                temp_file.unlink()
+            
+            return batch_results
 
         except Exception as e:
             log.error(f"Error in send_file_batch: {str(e)}")

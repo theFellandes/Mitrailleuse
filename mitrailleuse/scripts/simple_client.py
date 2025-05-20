@@ -23,6 +23,7 @@ from mitrailleuse.infrastructure.utils.prompt_utils import (
     build_deepl_body,
     find_prompt_content
 )
+from mitrailleuse.infrastructure.utils.format_response import format_batch_response
 
 # Configure logging
 logging.basicConfig(
@@ -443,124 +444,149 @@ class SimpleClient:
                         batch_data = [json.loads(line) for line in f if line.strip()]
                     
                     # Send batch request
-                    if service == "openai":
-                        if self._should_use_file_batch(config):
-                            # Use file batch API
-                            # Prepare batch request
-                            batch_request = {
-                                "input_file_id": None,  # Will be set after file upload
-                                "endpoint": "/v1/chat/completions",
-                                "completion_window": "24h",
-                                "metadata": {
-                                    "description": f"Batch processing for {batch_file.name}"
-                                }
-                            }
-
-                            # Prepare input file with custom_ids and method
-                            with open(batch_file, 'r') as f:
-                                input_data = [json.loads(line) for line in f if line.strip()]
-                            
-                            # Create a new JSONL file with custom_ids and method
-                            temp_batch_file = batch_file.parent / f"temp_{batch_file.name}"
-                            with open(temp_batch_file, 'w') as f:
-                                for i, item in enumerate(input_data):
-                                    # Create a new request object
-                                    request = {
-                                        'custom_id': f"request_{i}",
-                                        'method': "POST",
-                                        'url': "/v1/chat/completions"
+                    try:
+                        if service == "openai":
+                            if self._should_use_file_batch(config):
+                                # Use file batch API
+                                # Prepare batch request
+                                batch_request = {
+                                    "input_file_id": None,  # Will be set after file upload
+                                    "endpoint": "/v1/chat/completions",
+                                    "completion_window": "24h",
+                                    "metadata": {
+                                        "description": f"Batch processing for {batch_file.name}"
                                     }
-                                    
-                                    # Get prompt content using the configured prompt field
-                                    prompt_key = config["openai"]["prompt"]
-                                    
-                                    # Handle different input formats
-                                    if isinstance(item, str):
-                                        user_content = item
-                                    elif isinstance(item, dict):
-                                        if prompt_key in item:
-                                            user_content = item[prompt_key]
-                                        elif len(item) == 1:
-                                            user_content = next(iter(item.values()))
+                                }
+
+                                # Prepare input file with custom_ids and method
+                                with open(batch_file, 'r') as f:
+                                    input_data = [json.loads(line) for line in f if line.strip()]
+                                
+                                # Create a new JSONL file with custom_ids and method
+                                temp_batch_file = batch_file.parent / f"temp_{batch_file.name}"
+                                with open(temp_batch_file, 'w') as f:
+                                    for i, item in enumerate(input_data):
+                                        # Create a new request object
+                                        request = {
+                                            'custom_id': f"request_{i}",
+                                            'method': "POST",
+                                            'url': "/v1/chat/completions"
+                                        }
+                                        
+                                        # Get prompt content using the configured prompt field
+                                        prompt_key = config["openai"]["prompt"]
+                                        
+                                        # Handle different input formats
+                                        if isinstance(item, str):
+                                            user_content = item
+                                        elif isinstance(item, dict):
+                                            if prompt_key in item:
+                                                user_content = item[prompt_key]
+                                            elif len(item) == 1:
+                                                user_content = next(iter(item.values()))
+                                            else:
+                                                user_content = str(item)
                                         else:
                                             user_content = str(item)
-                                    else:
-                                        user_content = str(item)
-                                    
-                                    # Get system content if dynamic
-                                    is_dynamic = config["openai"]["system_instruction"]["is_dynamic"]
-                                    sys_prompt_key = config["openai"]["system_instruction"]["system_prompt"]
-                                    system_content = item.get(sys_prompt_key, "You are a helpful assistant") if is_dynamic else "You are a helpful assistant"
-                                    
-                                    # Add the body
-                                    request['body'] = {
-                                        "model": config["openai"]["api_information"]["model"],
-                                        "messages": [
-                                            {"role": "system", "content": system_content},
-                                            {"role": "user", "content": user_content}
-                                        ],
-                                        "temperature": config["openai"]["api_information"]["setting"]["temperature"],
-                                        "max_tokens": config["openai"]["api_information"]["setting"]["max_tokens"]
-                                    }
-                                    
-                                    f.write(json.dumps(request) + '\n')
-
-                            # Upload input file
-                            with open(temp_batch_file, 'rb') as f:
-                                input_file = await self.openai_client.files.create(
-                                    file=f,
-                                    purpose='batch'
-                                )
-                            batch_request["input_file_id"] = input_file.id
-
-                            # Create batch job
-                            batch_job = await self.openai_client.batches.create(
-                                **batch_request
-                            )
-
-                            # Clean up temporary file
-                            temp_batch_file.unlink()
-
-                            # Wait for processing
-                            while True:
-                                status = await self.openai_client.batches.retrieve(batch_job.id)
-                                if status.status in ['completed', 'failed', 'expired', 'cancelled']:
-                                    break
-                                await asyncio.sleep(config["openai"]["batch"]["batch_check_time"])
-                            
-                            # Get batch results
-                            if status.status == 'completed':
-                                results = await self.openai_client.batches.retrieve(batch_job.id)
-                                output_file_id = results.output_file_id
-                                
-                                # Download results
-                                output_file = await self.openai_client.files.content(output_file_id)
-                                
-                                # Handle binary response
-                                try:
-                                    # First try to decode as text
-                                    content = output_file.text
-                                    try:
-                                        # Try to parse as JSON
-                                        batch_results = json.loads(content)
-                                    except json.JSONDecodeError:
-                                        # If not JSON, wrap in expected format
-                                        batch_results = {
-                                            "choices": [
-                                                {
-                                                    "message": {
-                                                        "content": content
-                                                    }
-                                                }
-                                            ]
+                                        
+                                        # Get system content if dynamic
+                                        is_dynamic = config["openai"]["system_instruction"]["is_dynamic"]
+                                        sys_prompt_key = config["openai"]["system_instruction"]["system_prompt"]
+                                        system_content = item.get(sys_prompt_key, "You are a helpful assistant") if is_dynamic else "You are a helpful assistant"
+                                        
+                                        # Add the body
+                                        request['body'] = {
+                                            "model": config["openai"]["api_information"]["model"],
+                                            "messages": [
+                                                {"role": "system", "content": system_content},
+                                                {"role": "user", "content": user_content}
+                                            ],
+                                            "temperature": config["openai"]["api_information"]["setting"]["temperature"],
+                                            "max_tokens": config["openai"]["api_information"]["setting"]["max_tokens"]
                                         }
-                                except Exception as e:
-                                    # If text decoding fails, try to handle as binary
+                                        
+                                        f.write(json.dumps(request) + '\n')
+
+                                # Upload input file
+                                with open(temp_batch_file, 'rb') as f:
+                                    input_file = await self.openai_client.files.create(
+                                        file=f,
+                                        purpose='batch'
+                                    )
+                                batch_request["input_file_id"] = input_file.id
+
+                                # Create batch job
+                                batch_job = await self.openai_client.batches.create(
+                                    **batch_request
+                                )
+
+                                # Wait for processing with detailed logging
+                                logger.info(f"Started batch job {batch_job.id} for {batch_file.name}")
+                                print(f"\nProcessing batch {batch_file.name} with job ID: {batch_job.id}")
+                                print("Waiting for batch completion...")
+                                
+                                validation_start_time = datetime.now()
+                                last_status = None
+                                check_interval = config["openai"]["batch"]["batch_check_time"]
+                                
+                                while True:
+                                    status = await self.openai_client.batches.retrieve(batch_job.id)
+                                    current_time = datetime.now().isoformat()
+                                    
+                                    # Calculate progress if available
+                                    done = getattr(status, 'completed_count', 0)
+                                    total = getattr(status, 'total_count', 0)
+                                    progress = f"({done}/{total})" if total > 0 else ""
+                                    
+                                    # Add elapsed time for validation
+                                    if status.status == 'validating':
+                                        elapsed = datetime.now() - validation_start_time
+                                        elapsed_str = str(elapsed).split('.')[0]  # Remove microseconds
+                                        status_str = f"{status.status} (elapsed: {elapsed_str})"
+                                    else:
+                                        status_str = status.status
+                                    
+                                    # Only print if status changed
+                                    if status_str != last_status:
+                                        print(f"\nBatch status at {current_time}: {status_str} {progress}")
+                                        last_status = status_str
+                                    
+                                    if status.status in ['completed', 'failed', 'expired', 'cancelled']:
+                                        print(f"\nBatch {batch_job.id} finished with status: {status.status}")
+                                        break
+                                    
+                                    # Use the configured check interval
+                                    await asyncio.sleep(check_interval)
+                                
+                                print("\nRetrieving batch results...")
+                                
+                                # Get batch results
+                                if status.status == 'completed':
+                                    results = await self.openai_client.batches.retrieve(batch_job.id)
+                                    output_file_id = results.output_file_id
+                                    
+                                    # Download results
+                                    output_file = await self.openai_client.files.content(output_file_id)
+                                    
+                                    # Save raw response first
+                                    raw_output = base_path / "outputs" / f"{batch_file.stem}_raw_response.json"
+                                    with open(raw_output, 'w') as f:
+                                        # Wrap the results in a list
+                                        raw_results = []
+                                        for line in output_file.text.splitlines():
+                                            if line.strip():
+                                                raw_results.append(json.loads(line))
+                                        json.dump(raw_results, f, indent=2)
+                                    
+                                    # Handle binary response
                                     try:
-                                        content = output_file.content.decode('utf-8')
+                                        # First try to decode as text
+                                        content = output_file.text
                                         try:
+                                            # Try to parse as JSON
                                             batch_results = json.loads(content)
                                         except json.JSONDecodeError:
+                                            # If not JSON, wrap in expected format
                                             batch_results = {
                                                 "choices": [
                                                     {
@@ -570,152 +596,88 @@ class SimpleClient:
                                                     }
                                                 ]
                                             }
-                                    except Exception as decode_error:
-                                        logger.error(f"Error decoding binary response: {str(decode_error)}")
-                                        batch_results = {
-                                            "choices": [
-                                                {
-                                                    "message": {
-                                                        "content": f"Error decoding response: {str(decode_error)}"
-                                                    }
+                                    except Exception as e:
+                                        # If text decoding fails, try to handle as binary
+                                        try:
+                                            content = output_file.content.decode('utf-8')
+                                            try:
+                                                batch_results = json.loads(content)
+                                            except json.JSONDecodeError:
+                                                batch_results = {
+                                                    "choices": [
+                                                        {
+                                                            "message": {
+                                                                "content": content
+                                                            }
+                                                        }
+                                                    ]
                                                 }
-                                            ]
-                                        }
-                            else:
-                                batch_results = {
-                                    "choices": [
-                                        {
-                                            "message": {
-                                                "content": f"Batch job failed with status: {status.status}"
+                                        except Exception as decode_error:
+                                            logger.error(f"Error decoding binary response: {str(decode_error)}")
+                                            batch_results = {
+                                                "choices": [
+                                                    {
+                                                        "message": {
+                                                            "content": f"Error decoding response: {str(decode_error)}"
+                                                        }
+                                                    }
+                                                ]
                                             }
-                                        }
-                                    ]
-                                }
-                        else:
-                            # Use normal API with batching
-                            # Prepare messages for batch
-                            messages = []
-                            for item in batch_data:
-                                prompt_key = config["openai"]["prompt"]
-                                is_dynamic = config["openai"]["system_instruction"]["is_dynamic"]
-                                sys_prompt_key = config["openai"]["system_instruction"]["system_prompt"]
-                                
-                                user_content, system_content = find_prompt_content(
-                                    item, prompt_key, sys_prompt_key, is_dynamic
-                                )
-                                messages.append({
-                                    "role": "user",
-                                    "content": user_content
-                                })
-                            
-                            # Send batch request
-                            response = await self.openai_client.chat.completions.create(
-                                model=config["openai"]["api_information"]["model"],
-                                messages=messages,
-                                temperature=config["openai"]["api_information"]["setting"]["temperature"],
-                                max_tokens=config["openai"]["api_information"]["setting"]["max_tokens"]
-                            )
-                            
-                            # Handle different response types
-                            if hasattr(response, 'model_dump'):
-                                batch_results = response.model_dump()
-                            elif hasattr(response, 'dict'):
-                                batch_results = response.dict()
-                            elif hasattr(response, 'json'):
-                                batch_results = response.json()
-                            else:
-                                # Try to convert to dict if possible
-                                try:
-                                    batch_results = json.loads(str(response))
-                                except (json.JSONDecodeError, TypeError):
+                                else:
                                     batch_results = {
                                         "choices": [
                                             {
                                                 "message": {
-                                                    "content": str(response)
+                                                    "content": f"Batch job failed with status: {status.status}"
                                                 }
                                             }
                                         ]
                                     }
-                    elif service == "deepl":
-                        batch_results = await self.deepl_client.translate_text(
-                            [item.get("text", "") for item in batch_data],
-                            target_lang=config["deepl"]["target_lang"]
-                        )
-                        batch_results = {
-                            "responses": [
-                                {
-                                    "translated_text": t.text,
-                                    "detected_source_lang": t.detected_source_lang
-                                }
-                                for t in batch_results
-                            ]
-                        }
-                    
-                    # Save batch results
-                    output_dir = base_path / "outputs"
-                    output_dir.mkdir(parents=True, exist_ok=True)
-                    
-                    # Save raw response
-                    raw_output = output_dir / f"{batch_file.stem}_batch_response.json"
-                    with open(raw_output, 'w') as f:
-                        # Save the complete raw response
-                        if service == "openai":
-                            if isinstance(output_file, (str, bytes)):
-                                # For binary/text responses
-                                f.write(str(output_file))
-                            else:
-                                # For object responses
-                                try:
-                                    if hasattr(output_file, 'model_dump'):
-                                        json.dump(output_file.model_dump(), f, indent=2)
-                                    elif hasattr(output_file, 'dict'):
-                                        json.dump(output_file.dict(), f, indent=2)
-                                    elif hasattr(output_file, 'json'):
-                                        f.write(output_file.json())
-                                    else:
-                                        json.dump(str(output_file), f, indent=2)
-                                except Exception as e:
-                                    logger.error(f"Error saving raw response: {str(e)}")
-                                    json.dump({"error": str(e), "raw_response": str(output_file)}, f, indent=2)
-                        else:
-                            json.dump(batch_results, f, indent=2)
-                    
-                    # Save formatted response
-                    formatted_output = output_dir / f"{batch_file.stem}_batch_formatted.json"
-                    with open(formatted_output, 'w') as f:
-                        json.dump(batch_results, f, indent=2)
-                    
-                    # Save parsed response (content only)
-                    parsed_output = output_dir / f"parsed_{batch_file.stem}_batch_response.jsonl"
-                    with open(parsed_output, 'w') as f:
-                        if service == "openai":
-                            if isinstance(batch_results, dict):
-                                choices = batch_results.get("choices", [])
-                                for choice in choices:
-                                    content = choice.get("message", {}).get("content", "")
-                                    f.write(json.dumps({"content": content}) + '\n')
-                            else:
-                                # Handle case where results are not in expected format
-                                f.write(json.dumps({"content": str(batch_results)}) + '\n')
+                                
+                                # Save formatted response
+                                formatted_output = base_path / "outputs" / f"{batch_file.stem}_formatted_response.json"
+                                formatted_results = format_batch_response(
+                                    raw_output,
+                                    self.config_path,
+                                    formatted_output
+                                )
+                                
+                                # Save parsed response (content only)
+                                parsed_output = base_path / "outputs" / f"parsed_{batch_file.stem}_response.jsonl"
+                                with open(parsed_output, 'w') as f:
+                                    for result in formatted_results:
+                                        f.write(json.dumps({"content": result["assistant"]}) + '\n')
+                                
+                                # Add batch results to all results
+                                if isinstance(batch_results, dict):
+                                    all_results.extend(batch_results.get("choices", []))
+                                else:
+                                    all_results.append({"message": {"content": str(batch_results)}})
+                                
+                                # Clean up temporary file
+                                if temp_batch_file.exists():
+                                    temp_batch_file.unlink()
                         elif service == "deepl":
-                            for response in batch_results.get("responses", []):
-                                content = response.get("translated_text", "")
-                                f.write(json.dumps({"content": content}) + '\n')
-                    
-                    # Add batch results to all results
-                    if service == "openai":
-                        if isinstance(batch_results, dict):
-                            all_results.extend(batch_results.get("choices", []))
-                        else:
-                            all_results.append({"message": {"content": str(batch_results)}})
-                    else:
-                        all_results.extend(batch_results.get("responses", []))
-                    
+                            batch_results = await self.deepl_client.translate_text(
+                                [item.get("text", "") for item in batch_data],
+                                target_lang=config["deepl"]["target_lang"]
+                            )
+                            batch_results = {
+                                "responses": [
+                                    {
+                                        "translated_text": t.text,
+                                        "detected_source_lang": t.detected_source_lang
+                                    }
+                                    for t in batch_results
+                                ]
+                            }
+                    except Exception as e:
+                        logger.error(f"Error processing batch {batch_file} with {service}: {str(e)}")
+                        raise
+            
                 except Exception as e:
                     logger.error(f"Error processing batch {batch_file} with {service}: {str(e)}")
                     raise
-            
             # Combine results if configured
             if self._should_combine_batches(config):
                 combined_output = base_path / "outputs" / f"{input_file.stem}_combined_response.jsonl"
