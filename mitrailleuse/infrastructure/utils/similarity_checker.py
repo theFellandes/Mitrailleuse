@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import time
 from datasketch import MinHash, MinHashLSH
 import jieba
-from .logger import get_logger
+import logging
 
 class SimilarityChecker:
     """Utility class for checking response similarity using MinHash."""
@@ -20,7 +20,15 @@ class SimilarityChecker:
         """
         self.base_path = base_path
         self.config = config
-        self.logger = get_logger("similarity_checker", config)
+        
+        # Use basic logging instead of custom logger
+        self.logger = logging.getLogger("similarity_checker")
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+            self.logger.setLevel(logging.INFO)
         
         # Initialize LSH index
         self.lsh = MinHashLSH(threshold=0.5, num_perm=128)
@@ -35,6 +43,25 @@ class SimilarityChecker:
         
         # Load existing responses if available
         self._load_recent_responses()
+
+    def __getstate__(self):
+        """Make the class picklable by removing non-picklable attributes."""
+        state = self.__dict__.copy()
+        # Remove logger before pickling
+        state['logger'] = None
+        return state
+
+    def __setstate__(self, state):
+        """Restore logger after unpickling."""
+        self.__dict__.update(state)
+        # Recreate logger
+        self.logger = logging.getLogger("similarity_checker")
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+            self.logger.setLevel(logging.INFO)
 
     def _load_recent_responses(self) -> None:
         """Load recent responses from disk."""

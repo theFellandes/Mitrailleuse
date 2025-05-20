@@ -1,24 +1,36 @@
 import json
+import logging
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, List, Union, Any
 from datetime import datetime
 import shutil
 from .logger import get_logger
 
-class FileFlattener:
-    """Utility class for flattening input files based on configuration."""
+logger = logging.getLogger(__name__)
 
-    def __init__(self, base_path: Path, config: Dict[str, Any]):
-        """
-        Initialize the file flattener.
-        
-        Args:
-            base_path: Base path where files will be stored
-            config: Configuration dictionary
-        """
+class FileFlattener:
+    """Utility class for flattening nested JSON structures."""
+
+    def __init__(self, base_path: Path, config: Dict):
         self.base_path = base_path
         self.config = config
+        self.prompt_key = self._get_prompt_key()
+        self.instruction_key = self._get_instruction_key()
         self.logger = get_logger("file_flattener", config)
+
+    def _get_prompt_key(self) -> str:
+        """Get the prompt key from config."""
+        try:
+            return self.config["openai"]["prompt"]
+        except (KeyError, TypeError):
+            return "input_text"  # Default fallback
+
+    def _get_instruction_key(self) -> str:
+        """Get the instruction key from config."""
+        try:
+            return self.config["openai"]["system_instruction"]["system_prompt"]
+        except (KeyError, TypeError):
+            return "instructions"  # Default fallback
 
     def _backup_input_file(self, input_file: Path) -> None:
         """Backup the input file to the backup directory."""
@@ -29,97 +41,57 @@ class FileFlattener:
         shutil.copy2(input_file, backup_file)
         self.logger.info(f"Backed up input file to: {backup_file}")
 
-    def _get_nested_value(self, data: Dict[str, Any], path: str) -> Optional[Any]:
-        """
-        Get a nested value from a dictionary using dot notation.
+    def _flatten_item(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        """Flatten a single item while preserving all fields."""
+        result = {}
         
-        Args:
-            data: Input dictionary
-            path: Dot-notation path to the value
-            
-        Returns:
-            Value if found, None otherwise
-        """
-        try:
-            for key in path.split('.'):
-                data = data[key]
-            return data
-        except (KeyError, TypeError):
-            return None
-
-    def _flatten_item(self, item: Dict[str, Any], prompt_key: str, system_prompt_key: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Flatten a single item based on configuration.
+        # Always preserve the original item
+        result.update(item)
         
-        Args:
-            item: Input item to flatten
-            prompt_key: Key for the prompt field
-            system_prompt_key: Optional key for the system prompt field
-            
-        Returns:
-            Flattened item
-        """
-        flattened = {}
+        # If the item has nested prompts, flatten them
+        if "prompts" in item and isinstance(item["prompts"], list):
+            flattened_prompts = []
+            for prompt in item["prompts"]:
+                if isinstance(prompt, dict):
+                    # Preserve all fields in the prompt
+                    flattened_prompts.append(prompt)
+            result["prompts"] = flattened_prompts
         
-        # Get prompt value
-        prompt_value = self._get_nested_value(item, prompt_key)
-        if prompt_value is not None:
-            flattened[prompt_key] = prompt_value
-        
-        # Get system prompt value if configured
-        if system_prompt_key:
-            system_prompt_value = self._get_nested_value(item, system_prompt_key)
-            if system_prompt_value is not None:
-                flattened[system_prompt_key] = system_prompt_value
-        
-        return flattened
+        return result
 
     def flatten_file(self, input_file: Path) -> Path:
-        """
-        Flatten an input file based on configuration.
-        
-        Args:
-            input_file: Path to the input file
-            
-        Returns:
-            Path to the flattened file
-        """
-        # Backup original file
-        self._backup_input_file(input_file)
-        
-        # Get configuration
-        prompt_key = self.config.get("openai", {}).get("prompt", "input_text")
-        system_prompt_key = None
-        if self.config.get("openai", {}).get("system_instruction", {}).get("is_dynamic", False):
-            system_prompt_key = self.config["openai"]["system_instruction"].get("system_prompt", "instructions")
-        
-        # Read input file
-        with open(input_file, 'r') as f:
-            data = json.load(f)
-        
-        # Handle both single items and lists
-        if not isinstance(data, list):
-            data = [data]
-        
-        # Flatten each item
-        flattened_data = [
-            self._flatten_item(item, prompt_key, system_prompt_key)
-            for item in data
-        ]
-        
-        # Create flattened file
-        flattened_dir = self.base_path / "inputs" / "flattened"
-        flattened_dir.mkdir(parents=True, exist_ok=True)
-        
-        flattened_file = flattened_dir / f"{input_file.stem}_flattened{input_file.suffix}"
-        with open(flattened_file, 'w') as f:
-            if len(flattened_data) == 1:
-                json.dump(flattened_data[0], f, indent=2)
+        """Flatten a JSON file while preserving all fields."""
+        try:
+            # Backup original file
+            self._backup_input_file(input_file)
+
+            # Read the input file
+            with open(input_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            # Handle both array and object formats
+            if isinstance(data, list):
+                # If it's already a list of items, flatten each item
+                flattened_data = [self._flatten_item(item) for item in data]
+            elif isinstance(data, dict):
+                # If it's an object with prompts, flatten it
+                flattened_data = [self._flatten_item(data)]
             else:
-                json.dump(flattened_data, f, indent=2)
-        
-        self.logger.info(f"Created flattened file: {flattened_file}")
-        return flattened_file
+                raise ValueError(f"Unsupported data format in {input_file}")
+
+            # Create output file path
+            output_file = self.base_path / "inputs" / f"{input_file.stem}_flattened{input_file.suffix}"
+            
+            # Write flattened data
+            with open(output_file, 'w', encoding='utf-8') as f:
+                json.dump(flattened_data, f, indent=2, ensure_ascii=False)
+            
+            self.logger.info(f"Flattened {input_file} to {output_file}")
+            return output_file
+
+        except Exception as e:
+            self.logger.error(f"Error flattening file {input_file}: {str(e)}")
+            raise
 
     def flatten_all_files(self) -> List[Path]:
         """

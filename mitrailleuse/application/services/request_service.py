@@ -2,11 +2,10 @@ import datetime as dt
 import json
 import math
 import random
-import threading
+import asyncio
 import time
 import uuid
 import shutil
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 import multiprocessing
 
@@ -35,7 +34,6 @@ ADAPTERS = {
     "deepl":    DeepLAdapter,
     # extend here for any future provider
 }
-
 
 class RequestService:
     """Coordinates multiprocessing + caching + API adapter."""
@@ -136,7 +134,7 @@ class RequestService:
         log.info(f"Converted {input_file} to JSON format")
         return output_file
 
-    def _send_single(self, file_path: Path, base_path: Path):
+    async def _send_single(self, file_path: Path, base_path: Path):
         """Process a single file with backup and format conversion."""
         # Initialize file flattener
         file_flattener = FileFlattener(base_path, self.config)
@@ -146,38 +144,44 @@ class RequestService:
         
         # Convert to JSONL for processing
         jsonl_file = FileConverter.convert_to_jsonl(flattened_file, base_path)
-        user_payload = json.loads(jsonl_file.read_text())
-
-        # Choose provider-specific body
-        if isinstance(self.api, DeepLAdapter):
-            body_or_payload = user_payload
-        else:
-            body_or_payload = self._build_openai_body(user_payload)
-
-        # Try to get from memory cache first
-        def send_request():
-            log.info(f"Sending request for {file_path.name}")
-            response = self.api.send_single(body_or_payload)
-            
-            # Check similarity if enabled
-            if self.similarity_checker and self._check_similarity_enabled():
-                is_similar, similarity = self.similarity_checker.check_similarity(response)
-                if is_similar:
-                    cooldown_time = self.similarity_checker.get_cooldown_time()
-                    log.warning(
-                        f"Similar response detected (similarity: {similarity:.2f}). "
-                        f"Applying cooldown of {cooldown_time} seconds."
-                    )
-                    time.sleep(cooldown_time)
-            
-            return response
-
-        response = self.memory_cache.get_or_set(body_or_payload, send_request)
         
-        # Also update the file cache
-        self.cache.set(file_path.name, response)
+        # Read all lines from the JSONL file
+        with open(jsonl_file, 'r') as f:
+            items = [json.loads(line) for line in f if line.strip()]
+        
+        results = []
+        for item in items:
+            # Choose provider-specific body
+            if isinstance(self.api, DeepLAdapter):
+                body_or_payload = item
+            else:
+                body_or_payload = self._build_openai_body(item)
 
-        return file_path, response
+            # Try to get from memory cache first
+            async def send_request():
+                log.info(f"Sending request for item in {file_path.name}")
+                response = await self.api.send_single(body_or_payload)
+                
+                # Check similarity if enabled
+                if self.similarity_checker and self._check_similarity_enabled():
+                    is_similar, similarity = self.similarity_checker.check_similarity(response)
+                    if is_similar:
+                        cooldown_time = self.similarity_checker.get_cooldown_time()
+                        log.warning(
+                            f"Similar response detected (similarity: {similarity:.2f}). "
+                            f"Applying cooldown of {cooldown_time} seconds."
+                        )
+                        await asyncio.sleep(cooldown_time)
+                
+                return response
+
+            response = await self.memory_cache.get_or_set(body_or_payload, send_request)
+            results.append(response)
+            
+            # Also update the file cache
+            await self.cache.set(f"{file_path.name}_{len(results)}", response)
+
+        return file_path, results
 
     @staticmethod
     def _build_jsonl_file(payloads: list[dict], base: Path) -> Path:
@@ -212,8 +216,8 @@ class RequestService:
                 return len(json.load(f))  # wrapped list
             return sum(1 for _ in f)  # plain JSONL
 
-    def _track_batch_job(self, job_obj, base_path, task_name: str):
-        """Track batch job status in a daemon thread."""
+    async def _track_batch_job(self, job_obj, base_path, task_name: str):
+        """Track batch job status in a background task."""
         interval = self._get_batch_check_time(self.config)
         log_file_path = base_path / "logs" / "batch.log"
         outputs_path = base_path / "outputs"
@@ -224,10 +228,9 @@ class RequestService:
 
             while True:
                 try:
-                    status = self.api.get_batch_status(job_obj["id"])
+                    status = await self.api.get_batch_status(job_obj["id"])
 
                     # Compute progress & ETA when possible
-                    # Check in both places where these values might be in the OpenAI API response
                     done = status.get("completed_count", status.get("completed_at", 0))
                     total = status.get("total_count", status.get("total", 1))
 
@@ -243,7 +246,6 @@ class RequestService:
                     if done and done < total:
                         created_at = status.get("created_at", time.time())
                         if isinstance(created_at, str):
-                            # Parse ISO format if needed
                             try:
                                 created_at = dt.datetime.fromisoformat(
                                     created_at.replace('Z', '+00:00')).timestamp()
@@ -280,9 +282,8 @@ class RequestService:
                         # If completed successfully, try to download results
                         if status.get("status") == "completed":
                             try:
-
                                 log_f.write("Attempting to download batch results...\n")
-                                result_path: Path = self.api.download_batch_results(
+                                result_path: Path = await self.api.download_batch_results(
                                     job_obj["id"], outputs_path, task_name
                                 )
 
@@ -310,7 +311,7 @@ class RequestService:
                     log_f.write(f"Error checking batch status: {str(loop_err)}\n")
                     log_f.flush()
 
-                time.sleep(interval)
+                await asyncio.sleep(interval)
 
     # ---------------------------------------------------------- main
     def _calculate_process_cap(self, cfg) -> int:
@@ -353,7 +354,7 @@ class RequestService:
             except (KeyError, TypeError):
                 return False
 
-    def execute(self, task: Task, base_path: Path) -> str | None:
+    async def execute(self, task: Task, base_path: Path) -> str | None:
         """Return job_id when batch is launched else None."""
         task.status = TaskStatus.RUNNING
         log.info(f"Executing task: {task.task_name} in {base_path}")
@@ -385,9 +386,9 @@ class RequestService:
             task.status = TaskStatus.FAILED
             return None
 
-        # Calculate number of processes to use
-        n_proc = min(len(files), self._calculate_process_cap(self.config))
-        log.info(f"Using {n_proc} processes for processing")
+        # Calculate number of concurrent tasks
+        n_tasks = min(len(files), self._calculate_process_cap(self.config))
+        log.info(f"Using {n_tasks} concurrent tasks for processing")
 
         # ---------------- batch mode
         if self._is_batch_enabled(self.config):
@@ -403,7 +404,7 @@ class RequestService:
                 if self.similarity_checker and self.similarity_checker.should_cooldown():
                     cooldown_time = self.similarity_checker.get_cooldown_time()
                     log.warning(f"Cooldown active. Waiting {cooldown_time} seconds...")
-                    time.sleep(cooldown_time)
+                    await asyncio.sleep(cooldown_time)
                 
                 # Flatten and convert to JSONL
                 flattened_file = file_flattener.flatten_file(f)
@@ -416,8 +417,8 @@ class RequestService:
                     body = self._build_openai_body(user_payload)
                 
                 # Try to get from memory cache first
-                def send_request():
-                    response = self.api.send_single(body)
+                async def send_request():
+                    response = await self.api.send_single(body)
                     
                     # Check similarity if enabled
                     if self.similarity_checker and self._check_similarity_enabled():
@@ -428,28 +429,25 @@ class RequestService:
                                 f"Similar response detected (similarity: {similarity:.2f}). "
                                 f"Applying cooldown of {cooldown_time} seconds."
                             )
-                            time.sleep(cooldown_time)
+                            await asyncio.sleep(cooldown_time)
                     
                     return response
                 
-                response = self.memory_cache.get_or_set(body, send_request)
+                response = await self.memory_cache.get_or_set(body, send_request)
                 payloads.append(response)
 
             try:
-                job_obj = self.api.send_batch(payloads)
+                job_obj = await self.api.send_batch(payloads)
 
                 # 1) persist job‑meta
                 cache_file = base_path / "cache" / "batch_job.json"
                 cache_file.write_text(json.dumps(job_obj, indent=2))
 
-                # Start the tracking thread
-                tracking_thread = threading.Thread(
-                    target=self._track_batch_job,
-                    args=(job_obj, base_path, self.task_name),
-                    daemon=True
+                # Start the tracking task
+                asyncio.create_task(
+                    self._track_batch_job(job_obj, base_path, self.task_name)
                 )
-                tracking_thread.start()
-                log.info(f"Started batch tracking thread for job {job_obj['id']}")
+                log.info(f"Started batch tracking task for job {job_obj['id']}")
 
                 # Save batch results based on combine_batches setting
                 if not self._should_combine_batches(self.config):
@@ -478,22 +476,29 @@ class RequestService:
         
         try:
             outputs_path.mkdir(parents=True, exist_ok=True)
-            with ProcessPoolExecutor(max_workers=n_proc) as pool:
-                futures = {pool.submit(self._send_single, f, base_path): f for f in files}
-                for fut in as_completed(futures):
-                    try:
-                        fname, resp = fut.result()
-                        self.cache.set(fname.name, resp)
-                        out_name = self._result_filename(fname, self.task_name, 1)
-                        output_file = outputs_path / out_name
-                        output_file.write_text(json.dumps(resp, indent=2))
-                        log.info("Saved response for %s → %s", fname.name, out_name)
-                    except Exception as e:
-                        log.error(f"Error processing request: {str(e)}")
-                        task.status = TaskStatus.FAILED
-                        return None
+            
+            # Process files concurrently
+            tasks = []
+            for f in files:
+                task = asyncio.create_task(self._send_single(f, base_path))
+                tasks.append(task)
+            
+            # Wait for all tasks to complete
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for fname, resp in results:
+                if isinstance(resp, Exception):
+                    log.error(f"Error processing {fname.name}: {str(resp)}")
+                    task.status = TaskStatus.FAILED
+                    return None
+                
+                await self.cache.set(fname.name, resp)
+                out_name = self._result_filename(fname, self.task_name, 1)
+                output_file = outputs_path / out_name
+                output_file.write_text(json.dumps(resp, indent=2))
+                log.info("Saved response for %s → %s", fname.name, out_name)
 
-            self.cache.flush_to_disk()
+            await self.cache.flush_to_disk()
             task.status = TaskStatus.SUCCESS
             return None
         except Exception as e:
@@ -645,7 +650,7 @@ class RequestService:
             except (KeyError, TypeError):
                 return False
 
-    def ExecuteTask(self, request, context):
+    async def ExecuteTask(self, request, context):
         """gRPC endpoint implementation."""
         task_path = Path(request.task_folder)
         cfg = Config.read(task_path / "config" / "config.json")
@@ -655,13 +660,13 @@ class RequestService:
         self.api = api
         task = TaskService.status_from_path(task_path)
 
-        job_id = self.execute(task, task_path)
+        job_id = await self.execute(task, task_path)
 
         return mitrailleuse_pb2.ExecuteTaskResponse(
             status=task.status.value, job_id=job_id or ""
         )
 
-    def ListTasks(self, request, context):
+    async def ListTasks(self, request, context):
         """List available tasks for a user and task name."""
         try:
             tasks = TaskService.list_available_tasks(request.user_id, request.task_name)
@@ -682,7 +687,7 @@ class RequestService:
             context.set_details(str(e))
             return mitrailleuse_pb2.ListTasksResponse()
 
-    def GetTaskByPath(self, request, context):
+    async def GetTaskByPath(self, request, context):
         """Get task information from a specific path."""
         try:
             task = TaskService.get_task_by_path(Path(request.task_path))
@@ -702,3 +707,11 @@ class RequestService:
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return mitrailleuse_pb2.TaskInfo()
+
+    def close(self) -> None:
+        """Close the client and its resources."""
+        if hasattr(self.cache, 'close'):
+            self.cache.close()
+        if hasattr(self.similarity_checker, 'close'):
+            self.similarity_checker.close()
+        # Don't try to close the logger as it doesn't have a close method

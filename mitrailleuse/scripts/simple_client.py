@@ -4,13 +4,13 @@ import time
 import hashlib
 from pathlib import Path
 from typing import Dict, List, Optional, Union
-from openai import OpenAI
+from openai import AsyncOpenAI
 import httpx
 from datetime import datetime
 import logging
 import shutil
-import multiprocessing
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import asyncio
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import math
 import deepl
 from mitrailleuse.infrastructure.utils.file_converter import FileConverter
@@ -53,7 +53,7 @@ class SimpleClient:
         self.deepl_client = None
         
         if "openai" in self.config:
-            self.openai_client = OpenAI(api_key=self.config["openai"]["api_key"])
+            self.openai_client = AsyncOpenAI(api_key=self.config["openai"]["api_key"])
             self.openai_batch_size = self.config["openai"]["batch"]["batch_size"]
             self.openai_is_batch_active = self.config["openai"]["batch"]["is_batch_active"]
             self.openai_combine_batches = self.config.get("openai", {}).get("combine_batches", False)
@@ -64,8 +64,8 @@ class SimpleClient:
             self.deepl_is_batch_active = self.config["deepl"].get("is_batch_active", True)
             self.deepl_combine_batches = self.config["deepl"].get("combine_batches", True)
         
-        # Calculate process cap based on system resources
-        self.max_processes = self._calculate_process_cap()
+        # Calculate thread cap based on system resources
+        self.max_threads = self._calculate_thread_cap()
         
         self._create_task_directories()
         self._check_input_files()
@@ -291,10 +291,10 @@ class SimpleClient:
         
         return batch_files
 
-    def _calculate_process_cap(self) -> int:
-        """Calculate the maximum number of processes to use."""
+    def _calculate_thread_cap(self) -> int:
+        """Calculate the maximum number of threads to use."""
         # Get system CPU count
-        cpu_count = multiprocessing.cpu_count()
+        cpu_count = os.cpu_count() or 4
         
         # Calculate base cap (75% of CPU cores)
         base_cap = max(1, math.floor(cpu_count * 0.75))
@@ -320,7 +320,7 @@ class SimpleClient:
         except (KeyError, TypeError):
             return True  # Default to True for safety
 
-    def _process_single_file(self, input_file: Union[str, Path], service: str, base_path: Union[str, Path], config: Dict) -> Dict:
+    async def _process_single_file(self, input_file: Union[str, Path], service: str, base_path: Union[str, Path], config: Dict) -> Dict:
         """Process a single file and return the result."""
         try:
             # Convert string paths back to Path objects
@@ -333,7 +333,7 @@ class SimpleClient:
             
             # Initialize API client for this process
             if service == "openai":
-                api_client = OpenAI(api_key=config["openai"]["api_key"])
+                api_client = AsyncOpenAI(api_key=config["openai"]["api_key"])
             elif service == "deepl":
                 api_client = deepl.Translator(config["deepl"]["api_key"])
             
@@ -360,13 +360,13 @@ class SimpleClient:
                 if similarity_checker.should_cooldown():
                     cooldown_time = similarity_checker.get_cooldown_time()
                     logger.warning(f"Cooldown active. Waiting {cooldown_time} seconds...")
-                    time.sleep(cooldown_time)
+                    await asyncio.sleep(cooldown_time)
 
             # Build and send request
             request_body = self._build_request_body(input_data, service)
             try:
                 if service == "openai":
-                    response = api_client.chat.completions.create(**request_body)
+                    response = await api_client.chat.completions.create(**request_body)
                     result = {
                         "input": input_data,
                         "response": response.model_dump(),
@@ -396,7 +396,7 @@ class SimpleClient:
                             f"Similar response detected (similarity: {similarity:.2f}). "
                             f"Applying cooldown of {cooldown_time} seconds."
                         )
-                        time.sleep(cooldown_time)
+                        await asyncio.sleep(cooldown_time)
                 
                 # Save to cache
                 cache_manager.set(input_data, result, service)
@@ -419,7 +419,7 @@ class SimpleClient:
             logger.error(f"Error processing {input_file.name}: {str(e)}")
             return {"error": str(e)}
 
-    def _process_batch_file(self, input_file: Union[str, Path], service: str, base_path: Union[str, Path], config: Dict) -> List[Dict]:
+    async def _process_batch_file(self, input_file: Union[str, Path], service: str, base_path: Union[str, Path], config: Dict) -> List[Dict]:
         """Process a batch file and return the results."""
         try:
             # Convert string paths back to Path objects
@@ -432,7 +432,7 @@ class SimpleClient:
             
             # Initialize API client for this process
             if service == "openai":
-                api_client = OpenAI(api_key=config["openai"]["api_key"])
+                api_client = AsyncOpenAI(api_key=config["openai"]["api_key"])
             elif service == "deepl":
                 api_client = deepl.Translator(config["deepl"]["api_key"])
             
@@ -466,12 +466,12 @@ class SimpleClient:
                             if similarity_checker.should_cooldown():
                                 cooldown_time = similarity_checker.get_cooldown_time()
                                 logger.warning(f"Cooldown active. Waiting {cooldown_time} seconds...")
-                                time.sleep(cooldown_time)
+                                await asyncio.sleep(cooldown_time)
 
                         # Build and send request
                         request_body = self._build_request_body(item, service)
                         if service == "openai":
-                            response = api_client.chat.completions.create(**request_body)
+                            response = await api_client.chat.completions.create(**request_body)
                             result = {
                                 "input": item,
                                 "response": response.model_dump(),
@@ -501,7 +501,7 @@ class SimpleClient:
                                     f"Similar response detected (similarity: {similarity:.2f}). "
                                     f"Applying cooldown of {cooldown_time} seconds."
                                 )
-                                time.sleep(cooldown_time)
+                                await asyncio.sleep(cooldown_time)
                         
                         # Save to cache
                         cache_manager.set(item, result, service)
@@ -529,173 +529,8 @@ class SimpleClient:
             # Clean up
             cache_manager.close()
 
-    def process_single_file(self, input_file: Union[str, Path], service: str = "openai") -> Dict:
-        """Process a single input file using the specified service."""
-        input_file = Path(input_file)
-        
-        # Flatten the input file first
-        flattened_file = self.file_flattener.flatten_file(input_file)
-        
-        # Convert to JSONL for processing
-        jsonl_file = FileConverter.convert_to_jsonl(flattened_file, self.base_path, self.config)
-        
-        with open(jsonl_file, 'r') as f:
-            input_data = json.loads(f.readline().strip())
-
-        # Check cache first
-        cached_response = self.cache_manager.get(input_data, service)
-        if cached_response:
-            self.logger.info(f"Cache hit for {service} request")
-            return cached_response
-
-        # Check cooldown if similarity checking is enabled
-        if self.similarity_checker and self.similarity_checker.should_cooldown():
-            cooldown_time = self.similarity_checker.get_cooldown_time()
-            self.logger.warning(f"Cooldown active. Waiting {cooldown_time} seconds...")
-            time.sleep(cooldown_time)
-
-        # Build and send request
-        request_body = self._build_request_body(input_data, service)
-        try:
-            if service == "openai":
-                response = self.openai_client.chat.completions.create(**request_body)
-                result = {
-                    "input": input_data,
-                    "response": response.model_dump(),
-                    "timestamp": datetime.now().isoformat()
-                }
-            elif service == "deepl":
-                translation = self.deepl_client.translate_text(
-                    request_body["text"],
-                    target_lang=request_body["target_lang"],
-                    source_lang=request_body["source_lang"]
-                )
-                result = {
-                    "input": input_data,
-                    "response": {
-                        "translated_text": translation.text,
-                        "detected_source_lang": translation.detected_source_lang
-                    },
-                    "timestamp": datetime.now().isoformat()
-                }
-            
-            # Check similarity if enabled
-            if self.similarity_checker:
-                is_similar, similarity = self.similarity_checker.check_similarity(result["response"])
-                if is_similar:
-                    cooldown_time = self.similarity_checker.get_cooldown_time()
-                    self.logger.warning(
-                        f"Similar response detected (similarity: {similarity:.2f}). "
-                        f"Applying cooldown of {cooldown_time} seconds."
-                    )
-                    time.sleep(cooldown_time)
-            
-            # Save to cache
-            self.cache_manager.set(input_data, result, service)
-            
-            # Save response
-            output_file = self.base_path / "outputs" / f"{input_file.stem}_{service}_response.json"
-            with open(output_file, 'w') as f:
-                json.dump(result, f, indent=2)
-            
-            return result
-        except Exception as e:
-            self.logger.error(f"Error processing file {input_file} with {service}: {str(e)}")
-            raise
-
-    def process_batch(self, input_file: Union[str, Path], service: str = "openai") -> List[Dict]:
-        """Process input file in batches using the specified service."""
-        input_file = Path(input_file)
-        
-        # Flatten the input file first
-        flattened_file = self.file_flattener.flatten_file(input_file)
-        
-        # Convert to JSONL and process
-        jsonl_file = FileConverter.convert_to_jsonl(flattened_file, self.base_path, self.config)
-        batch_size = self.openai_batch_size if service == "openai" else self.deepl_batch_size
-        batch_files = self._split_into_batches(jsonl_file, batch_size)
-        
-        results = []
-        for batch_file in batch_files:
-            try:
-                with open(batch_file, 'r') as f:
-                    batch_data = [json.loads(line) for line in f if line.strip()]
-                
-                batch_results = []
-                for item in batch_data:
-                    # Check cache first
-                    cached_response = self.cache_manager.get(item, service)
-                    if cached_response:
-                        batch_results.append(cached_response)
-                        continue
-
-                    # Check cooldown if similarity checking is enabled
-                    if self.similarity_checker and self.similarity_checker.should_cooldown():
-                        cooldown_time = self.similarity_checker.get_cooldown_time()
-                        self.logger.warning(f"Cooldown active. Waiting {cooldown_time} seconds...")
-                        time.sleep(cooldown_time)
-
-                    # Build and send request
-                    request_body = self._build_request_body(item, service)
-                    if service == "openai":
-                        response = self.openai_client.chat.completions.create(**request_body)
-                        result = {
-                            "input": item,
-                            "response": response.model_dump(),
-                            "timestamp": datetime.now().isoformat()
-                        }
-                    elif service == "deepl":
-                        translation = self.deepl_client.translate_text(
-                            request_body["text"],
-                            target_lang=request_body["target_lang"],
-                            source_lang=request_body["source_lang"]
-                        )
-                        result = {
-                            "input": item,
-                            "response": {
-                                "translated_text": translation.text,
-                                "detected_source_lang": translation.detected_source_lang
-                            },
-                            "timestamp": datetime.now().isoformat()
-                        }
-                    
-                    # Check similarity if enabled
-                    if self.similarity_checker:
-                        is_similar, similarity = self.similarity_checker.check_similarity(result["response"])
-                        if is_similar:
-                            cooldown_time = self.similarity_checker.get_cooldown_time()
-                            self.logger.warning(
-                                f"Similar response detected (similarity: {similarity:.2f}). "
-                                f"Applying cooldown of {cooldown_time} seconds."
-                            )
-                            time.sleep(cooldown_time)
-                    
-                    # Save to cache
-                    self.cache_manager.set(item, result, service)
-                    batch_results.append(result)
-                
-                # Save batch results
-                output_file = self.base_path / "outputs" / f"{batch_file.stem}_{service}_responses.json"
-                with open(output_file, 'w') as f:
-                    json.dump(batch_results, f, indent=2)
-                
-                results.extend(batch_results)
-                
-            except Exception as e:
-                self.logger.error(f"Error processing batch {batch_file} with {service}: {str(e)}")
-                raise
-        
-        return results
-
-    def process_file(self, input_file: Union[str, Path], service: str = "openai") -> Union[Dict, List[Dict]]:
-        """Process input file in single or batch mode based on configuration."""
-        is_batch_active = self.openai_is_batch_active if service == "openai" else self.deepl_is_batch_active
-        if is_batch_active:
-            return self.process_batch(input_file, service)
-        return self.process_single_file(input_file, service)
-
-    def process_all_files(self, service: str = "openai") -> Dict[str, Union[Dict, List[Dict]]]:
-        """Process all JSON and JSONL files in the input directory using multiprocessing."""
+    async def process_all_files(self, service: str = "openai") -> Dict[str, Union[Dict, List[Dict]]]:
+        """Process all JSON and JSONL files in the input directory using async/await."""
         input_dir = self.base_path / "inputs"
         results = {}
         
@@ -708,69 +543,56 @@ class SimpleClient:
         
         logger.info(f"Found {len(input_files)} files to process with {service}")
         
-        # Calculate number of processes to use
-        num_processes = min(len(input_files), self.max_processes)
-        logger.info(f"Using {num_processes} processes for processing")
+        # Calculate number of concurrent tasks
+        num_tasks = min(len(input_files), self.max_threads)
+        logger.info(f"Using {num_tasks} concurrent tasks for processing")
         
         is_batch_active = self.openai_is_batch_active if service == "openai" else self.deepl_is_batch_active
         combine_batches = self.openai_combine_batches if service == "openai" else self.deepl_combine_batches
         
-        # Create a pool of workers
-        with ProcessPoolExecutor(max_workers=num_processes) as executor:
+        # Process files concurrently
+        tasks = []
+        for input_file in input_files:
             if is_batch_active:
-                # Process in batch mode
-                futures = []
-                for input_file in input_files:
-                    # Pass only the necessary data to the worker process
-                    future = executor.submit(
-                        self._process_batch_file,
-                        str(input_file),  # Convert Path to string
+                task = asyncio.create_task(
+                    self._process_batch_file(
+                        str(input_file),
                         service,
-                        str(self.base_path),  # Convert Path to string
-                        self.config  # Pass config dict
+                        str(self.base_path),
+                        self.config
                     )
-                    futures.append((future, input_file))
-                
-                for future, input_file in futures:
-                    try:
-                        batch_results = future.result()
-                        if not combine_batches:
-                            # Save each batch result separately
-                            for i, result in enumerate(batch_results):
-                                output_file = self.base_path / "outputs" / f"{input_file.stem}_{service}_batch_{i}_response.json"
-                                with open(output_file, 'w') as f:
-                                    json.dump(result, f, indent=2)
-                        else:
-                            # Combine all batch results
-                            output_file = self.base_path / "outputs" / f"{input_file.stem}_{service}_responses.json"
-                            with open(output_file, 'w') as f:
-                                json.dump(batch_results, f, indent=2)
-                        
-                        results[input_file.name] = batch_results
-                    except Exception as e:
-                        logger.error(f"Error processing {input_file.name} with {service}: {str(e)}")
-                        results[input_file.name] = {"error": str(e)}
+                )
             else:
-                # Process in single mode
-                futures = []
-                for input_file in input_files:
-                    # Pass only the necessary data to the worker process
-                    future = executor.submit(
-                        self._process_single_file,
-                        str(input_file),  # Convert Path to string
+                task = asyncio.create_task(
+                    self._process_single_file(
+                        str(input_file),
                         service,
-                        str(self.base_path),  # Convert Path to string
-                        self.config  # Pass config dict
+                        str(self.base_path),
+                        self.config
                     )
-                    futures.append((future, input_file))
+                )
+            tasks.append((task, input_file))
+        
+        # Wait for all tasks to complete
+        for task, input_file in tasks:
+            try:
+                result = await task
+                if not combine_batches and is_batch_active:
+                    # Save each batch result separately
+                    for i, batch_result in enumerate(result):
+                        output_file = self.base_path / "outputs" / f"{input_file.stem}_{service}_batch_{i}_response.json"
+                        with open(output_file, 'w') as f:
+                            json.dump(batch_result, f, indent=2)
+                else:
+                    # Save combined results
+                    output_file = self.base_path / "outputs" / f"{input_file.stem}_{service}_responses.json"
+                    with open(output_file, 'w') as f:
+                        json.dump(result, f, indent=2)
                 
-                for future, input_file in futures:
-                    try:
-                        result = future.result()
-                        results[input_file.name] = result
-                    except Exception as e:
-                        logger.error(f"Error processing {input_file.name} with {service}: {str(e)}")
-                        results[input_file.name] = {"error": str(e)}
+                results[input_file.name] = result
+            except Exception as e:
+                logger.error(f"Error processing {input_file.name} with {service}: {str(e)}")
+                results[input_file.name] = {"error": str(e)}
         
         return results
 
@@ -790,7 +612,7 @@ class SimpleClient:
         if self.similarity_checker:
             self.similarity_checker.close()
 
-def main():
+async def main():
     # Get the script's directory
     script_dir = Path(__file__).parent.absolute()
     config_path = script_dir / "config.json"
@@ -807,13 +629,13 @@ def main():
         # Process with OpenAI if configured
         if client.openai_client:
             print("\nProcessing with OpenAI...")
-            openai_results = client.process_all_files(service="openai")
+            openai_results = await client.process_all_files(service="openai")
             print(f"OpenAI processing completed for {len(openai_results)} files.")
         
         # Process with DeepL if configured
         if client.deepl_client:
             print("\nProcessing with DeepL...")
-            deepl_results = client.process_all_files(service="deepl")
+            deepl_results = await client.process_all_files(service="deepl")
             print(f"DeepL processing completed for {len(deepl_results)} files.")
         
         print(f"\nCache stats: {client.get_cache_stats()}")
@@ -840,4 +662,4 @@ def main():
         print(f"Error: {str(e)}")
 
 if __name__ == "__main__":
-    main() 
+    asyncio.run(main()) 
