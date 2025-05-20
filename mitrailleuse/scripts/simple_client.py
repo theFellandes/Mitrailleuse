@@ -23,7 +23,7 @@ from mitrailleuse.infrastructure.utils.prompt_utils import (
     build_deepl_body,
     find_prompt_content
 )
-from mitrailleuse.infrastructure.utils.format_response import format_batch_response
+from format_response import ResponseFormatter
 
 # Configure logging
 logging.basicConfig(
@@ -636,11 +636,8 @@ class SimpleClient:
                                 
                                 # Save formatted response
                                 formatted_output = base_path / "outputs" / f"{batch_file.stem}_formatted_response.json"
-                                formatted_results = format_batch_response(
-                                    raw_output,
-                                    self.config_path,
-                                    formatted_output
-                                )
+                                formatter = ResponseFormatter(self.user_id, self.task_name, base_path)
+                                formatted_results = formatter.format_batch_response(raw_output, formatted_output)
                                 
                                 # Save parsed response (content only)
                                 parsed_output = base_path / "outputs" / f"parsed_{batch_file.stem}_response.jsonl"
