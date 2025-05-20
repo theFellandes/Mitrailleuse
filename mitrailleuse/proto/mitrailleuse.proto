@@ -6,6 +6,8 @@ service MitrailleuseService {
   rpc CreateTask (CreateTaskRequest) returns (CreateTaskResponse);
   rpc ExecuteTask (ExecuteTaskRequest) returns (ExecuteTaskResponse);
   rpc GetTaskStatus (GetTaskStatusRequest) returns (GetTaskStatusResponse);
+  rpc ListTasks(ListTasksRequest) returns (ListTasksResponse) {}
+  rpc GetTaskByPath(GetTaskByPathRequest) returns (TaskInfo) {}
 }
 
 message CreateTaskRequest {
@@ -36,4 +38,26 @@ message GetTaskStatusRequest {
 
 message GetTaskStatusResponse {
   string status = 1;
+}
+
+
+message ListTasksRequest {
+    string user_id = 1;
+    string task_name = 2;
+}
+
+message ListTasksResponse {
+    repeated TaskInfo tasks = 1;
+}
+
+message GetTaskByPathRequest {
+    string task_path = 1;
+}
+
+message TaskInfo {
+    string user_id = 1;
+    string api_name = 2;
+    string task_name = 3;
+    string status = 4;
+    string path = 5;
 }

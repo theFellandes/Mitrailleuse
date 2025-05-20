@@ -15,7 +15,9 @@ import math
 import deepl
 from ..infrastructure.utils.file_converter import FileConverter
 from ..infrastructure.utils.cache_manager import CacheManager
+from ..infrastructure.utils.file_flattener import FileFlattener
 from ..infrastructure.utils.logger import get_logger
+from ..infrastructure.utils.similarity_checker import SimilarityChecker
 
 # Configure logging
 logging.basicConfig(
@@ -69,10 +71,19 @@ class SimpleClient:
         self._check_input_files()
         
         # Initialize cache manager
-        self.cache_manager = CacheManager(self.base_path)
+        self.cache_manager = CacheManager(self.base_path, self.config)
 
         # Initialize logger
         self.logger = get_logger("simple_client", self.config)
+        
+        # Initialize file flattener
+        self.file_flattener = FileFlattener(self.base_path, self.config)
+        
+        # Initialize similarity checker if enabled
+        self.similarity_checker = None
+        if self._check_similarity_enabled():
+            self.similarity_checker = SimilarityChecker(self.base_path, self.config)
+            self.logger.info("Similarity checking enabled")
 
     def _load_config(self, config_path: Union[str, Path]) -> Dict:
         """Load configuration from JSON file."""
@@ -314,12 +325,22 @@ class SimpleClient:
             logger.error(f"Error processing batch {input_file.name}: {str(e)}")
             return [{"error": str(e)}]
 
+    def _check_similarity_enabled(self) -> bool:
+        """Check if similarity checking is enabled in config."""
+        try:
+            return bool(self.config["general"]["check_similarity"])
+        except (KeyError, TypeError):
+            return False
+
     def process_single_file(self, input_file: Union[str, Path], service: str = "openai") -> Dict:
         """Process a single input file using the specified service."""
         input_file = Path(input_file)
         
+        # Flatten the input file first
+        flattened_file = self.file_flattener.flatten_file(input_file)
+        
         # Convert to JSONL for processing
-        jsonl_file = FileConverter.convert_to_jsonl(input_file, self.base_path, self.config)
+        jsonl_file = FileConverter.convert_to_jsonl(flattened_file, self.base_path, self.config)
         
         with open(jsonl_file, 'r') as f:
             input_data = json.loads(f.readline().strip())
@@ -327,8 +348,14 @@ class SimpleClient:
         # Check cache first
         cached_response = self.cache_manager.get(input_data, service)
         if cached_response:
-            logger.info(f"Cache hit for {service} request")
+            self.logger.info(f"Cache hit for {service} request")
             return cached_response
+
+        # Check cooldown if similarity checking is enabled
+        if self.similarity_checker and self.similarity_checker.should_cooldown():
+            cooldown_time = self.similarity_checker.get_cooldown_time()
+            self.logger.warning(f"Cooldown active. Waiting {cooldown_time} seconds...")
+            time.sleep(cooldown_time)
 
         # Build and send request
         request_body = self._build_request_body(input_data, service)
@@ -355,6 +382,17 @@ class SimpleClient:
                     "timestamp": datetime.now().isoformat()
                 }
             
+            # Check similarity if enabled
+            if self.similarity_checker:
+                is_similar, similarity = self.similarity_checker.check_similarity(result["response"])
+                if is_similar:
+                    cooldown_time = self.similarity_checker.get_cooldown_time()
+                    self.logger.warning(
+                        f"Similar response detected (similarity: {similarity:.2f}). "
+                        f"Applying cooldown of {cooldown_time} seconds."
+                    )
+                    time.sleep(cooldown_time)
+            
             # Save to cache
             self.cache_manager.set(input_data, result, service)
             
@@ -365,13 +403,18 @@ class SimpleClient:
             
             return result
         except Exception as e:
-            logger.error(f"Error processing file {input_file} with {service}: {str(e)}")
+            self.logger.error(f"Error processing file {input_file} with {service}: {str(e)}")
             raise
 
     def process_batch(self, input_file: Union[str, Path], service: str = "openai") -> List[Dict]:
         """Process input file in batches using the specified service."""
         input_file = Path(input_file)
-        jsonl_file = FileConverter.convert_to_jsonl(input_file, self.base_path, self.config)
+        
+        # Flatten the input file first
+        flattened_file = self.file_flattener.flatten_file(input_file)
+        
+        # Convert to JSONL and process
+        jsonl_file = FileConverter.convert_to_jsonl(flattened_file, self.base_path, self.config)
         batch_size = self.openai_batch_size if service == "openai" else self.deepl_batch_size
         batch_files = self._split_into_batches(jsonl_file, batch_size)
         
@@ -388,6 +431,12 @@ class SimpleClient:
                     if cached_response:
                         batch_results.append(cached_response)
                         continue
+
+                    # Check cooldown if similarity checking is enabled
+                    if self.similarity_checker and self.similarity_checker.should_cooldown():
+                        cooldown_time = self.similarity_checker.get_cooldown_time()
+                        self.logger.warning(f"Cooldown active. Waiting {cooldown_time} seconds...")
+                        time.sleep(cooldown_time)
 
                     # Build and send request
                     request_body = self._build_request_body(item, service)
@@ -413,6 +462,17 @@ class SimpleClient:
                             "timestamp": datetime.now().isoformat()
                         }
                     
+                    # Check similarity if enabled
+                    if self.similarity_checker:
+                        is_similar, similarity = self.similarity_checker.check_similarity(result["response"])
+                        if is_similar:
+                            cooldown_time = self.similarity_checker.get_cooldown_time()
+                            self.logger.warning(
+                                f"Similar response detected (similarity: {similarity:.2f}). "
+                                f"Applying cooldown of {cooldown_time} seconds."
+                            )
+                            time.sleep(cooldown_time)
+                    
                     # Save to cache
                     self.cache_manager.set(item, result, service)
                     batch_results.append(result)
@@ -425,7 +485,7 @@ class SimpleClient:
                 results.extend(batch_results)
                 
             except Exception as e:
-                logger.error(f"Error processing batch {batch_file} with {service}: {str(e)}")
+                self.logger.error(f"Error processing batch {batch_file} with {service}: {str(e)}")
                 raise
         
         return results
@@ -512,6 +572,8 @@ class SimpleClient:
         """Close the client and its resources."""
         self.cache_manager.close()
         self.logger.close()
+        if self.similarity_checker:
+            self.similarity_checker.close()
 
 def main():
     # Get the script's directory

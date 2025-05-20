@@ -49,6 +49,16 @@ class MitrailleuseServiceStub(object):
                 request_serializer=mitrailleuse__pb2.GetTaskStatusRequest.SerializeToString,
                 response_deserializer=mitrailleuse__pb2.GetTaskStatusResponse.FromString,
                 _registered_method=True)
+        self.ListTasks = channel.unary_unary(
+                '/mitrailleuse.MitrailleuseService/ListTasks',
+                request_serializer=mitrailleuse__pb2.ListTasksRequest.SerializeToString,
+                response_deserializer=mitrailleuse__pb2.ListTasksResponse.FromString,
+                _registered_method=True)
+        self.GetTaskByPath = channel.unary_unary(
+                '/mitrailleuse.MitrailleuseService/GetTaskByPath',
+                request_serializer=mitrailleuse__pb2.GetTaskByPathRequest.SerializeToString,
+                response_deserializer=mitrailleuse__pb2.TaskInfo.FromString,
+                _registered_method=True)
 
 
 class MitrailleuseServiceServicer(object):
@@ -72,6 +82,18 @@ class MitrailleuseServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ListTasks(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetTaskByPath(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_MitrailleuseServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -89,6 +111,16 @@ def add_MitrailleuseServiceServicer_to_server(servicer, server):
                     servicer.GetTaskStatus,
                     request_deserializer=mitrailleuse__pb2.GetTaskStatusRequest.FromString,
                     response_serializer=mitrailleuse__pb2.GetTaskStatusResponse.SerializeToString,
+            ),
+            'ListTasks': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListTasks,
+                    request_deserializer=mitrailleuse__pb2.ListTasksRequest.FromString,
+                    response_serializer=mitrailleuse__pb2.ListTasksResponse.SerializeToString,
+            ),
+            'GetTaskByPath': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetTaskByPath,
+                    request_deserializer=mitrailleuse__pb2.GetTaskByPathRequest.FromString,
+                    response_serializer=mitrailleuse__pb2.TaskInfo.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -172,6 +204,60 @@ class MitrailleuseService(object):
             '/mitrailleuse.MitrailleuseService/GetTaskStatus',
             mitrailleuse__pb2.GetTaskStatusRequest.SerializeToString,
             mitrailleuse__pb2.GetTaskStatusResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListTasks(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/mitrailleuse.MitrailleuseService/ListTasks',
+            mitrailleuse__pb2.ListTasksRequest.SerializeToString,
+            mitrailleuse__pb2.ListTasksResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetTaskByPath(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/mitrailleuse.MitrailleuseService/GetTaskByPath',
+            mitrailleuse__pb2.GetTaskByPathRequest.SerializeToString,
+            mitrailleuse__pb2.TaskInfo.FromString,
             options,
             channel_credentials,
             insecure,

@@ -92,7 +92,11 @@
       }
     },
 
-    "check_similarity": false,
-    "similarity_stop_action": false
+    "check_similarity": true,
+    "similarity_settings": {
+      "similarity_threshold": 0.8,
+      "cooldown_period": 300,
+      "max_recent_responses": 100
+    }
   }
 }

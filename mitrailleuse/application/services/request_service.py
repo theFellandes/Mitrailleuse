@@ -24,6 +24,8 @@ from ...infrastructure.adapters.memory_cache_adapter import MemoryCache
 from ...infrastructure.logging.logger import get_logger
 from ...infrastructure.utils.mp_pool import pick_num_processes
 from ...infrastructure.utils.file_converter import FileConverter
+from ...infrastructure.utils.file_flattener import FileFlattener
+from ...infrastructure.utils.similarity_checker import SimilarityChecker
 
 log = get_logger(__name__)
 
@@ -43,6 +45,7 @@ class RequestService:
         self.cache = cache
         self.memory_cache = MemoryCache()  # Add in-memory cache
         self.config = config
+        self.similarity_checker = None  # Will be initialized in execute()
 
         # ── derive the task-name once, for all filenames ───────────────────
         self.task_name: str | None = getattr(config, "task_name", None)
@@ -135,8 +138,14 @@ class RequestService:
 
     def _send_single(self, file_path: Path, base_path: Path):
         """Process a single file with backup and format conversion."""
+        # Initialize file flattener
+        file_flattener = FileFlattener(base_path, self.config)
+        
+        # Flatten the input file first
+        flattened_file = file_flattener.flatten_file(file_path)
+        
         # Convert to JSONL for processing
-        jsonl_file = FileConverter.convert_to_jsonl(file_path, base_path)
+        jsonl_file = FileConverter.convert_to_jsonl(flattened_file, base_path)
         user_payload = json.loads(jsonl_file.read_text())
 
         # Choose provider-specific body
@@ -148,7 +157,20 @@ class RequestService:
         # Try to get from memory cache first
         def send_request():
             log.info(f"Sending request for {file_path.name}")
-            return self.api.send_single(body_or_payload)
+            response = self.api.send_single(body_or_payload)
+            
+            # Check similarity if enabled
+            if self.similarity_checker and self._check_similarity_enabled():
+                is_similar, similarity = self.similarity_checker.check_similarity(response)
+                if is_similar:
+                    cooldown_time = self.similarity_checker.get_cooldown_time()
+                    log.warning(
+                        f"Similar response detected (similarity: {similarity:.2f}). "
+                        f"Applying cooldown of {cooldown_time} seconds."
+                    )
+                    time.sleep(cooldown_time)
+            
+            return response
 
         response = self.memory_cache.get_or_set(body_or_payload, send_request)
         
@@ -336,6 +358,11 @@ class RequestService:
         task.status = TaskStatus.RUNNING
         log.info(f"Executing task: {task.task_name} in {base_path}")
 
+        # Initialize similarity checker if enabled
+        if self._check_similarity_enabled():
+            self.similarity_checker = SimilarityChecker(base_path, self.config)
+            log.info("Similarity checking enabled")
+
         # Create necessary directories
         FileConverter.ensure_directory_structure(base_path)
         inputs_path = base_path / "inputs"
@@ -366,11 +393,21 @@ class RequestService:
         if self._is_batch_enabled(self.config):
             log.info("Using batch mode for request")
             
+            # Initialize file flattener
+            file_flattener = FileFlattener(base_path, self.config)
+            
             # Process each file through memory cache
             payloads = []
             for f in files:
-                # Convert to JSONL and backup
-                jsonl_file = FileConverter.convert_to_jsonl(f, base_path)
+                # Check cooldown if similarity checking is enabled
+                if self.similarity_checker and self.similarity_checker.should_cooldown():
+                    cooldown_time = self.similarity_checker.get_cooldown_time()
+                    log.warning(f"Cooldown active. Waiting {cooldown_time} seconds...")
+                    time.sleep(cooldown_time)
+                
+                # Flatten and convert to JSONL
+                flattened_file = file_flattener.flatten_file(f)
+                jsonl_file = FileConverter.convert_to_jsonl(flattened_file, base_path)
                 user_payload = json.loads(jsonl_file.read_text())
                 
                 if isinstance(self.api, DeepLAdapter):
@@ -380,7 +417,20 @@ class RequestService:
                 
                 # Try to get from memory cache first
                 def send_request():
-                    return self.api.send_single(body)
+                    response = self.api.send_single(body)
+                    
+                    # Check similarity if enabled
+                    if self.similarity_checker and self._check_similarity_enabled():
+                        is_similar, similarity = self.similarity_checker.check_similarity(response)
+                        if is_similar:
+                            cooldown_time = self.similarity_checker.get_cooldown_time()
+                            log.warning(
+                                f"Similar response detected (similarity: {similarity:.2f}). "
+                                f"Applying cooldown of {cooldown_time} seconds."
+                            )
+                            time.sleep(cooldown_time)
+                    
+                    return response
                 
                 response = self.memory_cache.get_or_set(body, send_request)
                 payloads.append(response)
@@ -450,6 +500,10 @@ class RequestService:
             log.error(f"Error in execute: {str(e)}")
             task.status = TaskStatus.FAILED
             return None
+        finally:
+            # Clean up similarity checker
+            if self.similarity_checker:
+                self.similarity_checker.close()
 
     @staticmethod
     def _sampling_enabled(cfg) -> bool:
@@ -577,6 +631,17 @@ class RequestService:
             # dict-style access (what we have after json round-trip)
             try:
                 return bool(cfg_dict_or_obj["openai"]["batch"]["is_batch_active"])
+            except (KeyError, TypeError):
+                return False
+
+    @staticmethod
+    def _check_similarity_enabled(cfg) -> bool:
+        """Check if similarity checking is enabled in config."""
+        try:
+            return bool(cfg.general.check_similarity)
+        except AttributeError:
+            try:
+                return bool(cfg["general"]["check_similarity"])
             except (KeyError, TypeError):
                 return False
 
