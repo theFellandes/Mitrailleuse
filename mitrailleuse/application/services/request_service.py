@@ -719,39 +719,10 @@ class RequestService:
                             batch_response = await self.api.send_file_batch(batch_file)
                             
                             # Check if batch was successful
-                            if batch_response.get("status") == "failed":
-                                raise Exception(batch_response.get("error", "Unknown error in batch processing"))
+                            if isinstance(batch_response, dict) and batch_response.get("choices", [{}])[0].get("message", {}).get("content", "").startswith("Batch job failed"):
+                                raise Exception(batch_response["choices"][0]["message"]["content"])
                             
-                            # Get batch results
-                            batch_results = batch_response.get("results", {})
-                            
-                            # Handle different result types
-                            if isinstance(batch_results, str):
-                                try:
-                                    # Try to parse as JSON
-                                    batch_results = json.loads(batch_results)
-                                except json.JSONDecodeError:
-                                    # If not JSON, wrap in expected format
-                                    batch_results = {
-                                        "choices": [
-                                            {
-                                                "message": {
-                                                    "content": batch_results
-                                                }
-                                            }
-                                        ]
-                                    }
-                            elif not isinstance(batch_results, dict):
-                                # Handle non-dict, non-string results
-                                batch_results = {
-                                    "choices": [
-                                        {
-                                            "message": {
-                                                "content": str(batch_results)
-                                            }
-                                        }
-                                    ]
-                                }
+                            batch_results = batch_response
                         else:
                             # Use normal API with batching
                             batch_response = await self.api.send_batch(batch_data)
@@ -779,6 +750,20 @@ class RequestService:
                                             }
                                         ]
                                     }
+                    elif service == "deepl":
+                        batch_results = await self.deepl_client.translate_text(
+                            [item.get("text", "") for item in batch_data],
+                            target_lang=config["deepl"]["target_lang"]
+                        )
+                        batch_results = {
+                            "responses": [
+                                {
+                                    "translated_text": t.text,
+                                    "detected_source_lang": t.detected_source_lang
+                                }
+                                for t in batch_results
+                            ]
+                        }
                     
                     # Save batch results
                     output_dir = base_path / "outputs"
@@ -789,7 +774,12 @@ class RequestService:
                     with open(raw_output, 'w') as f:
                         json.dump(batch_results, f, indent=2)
                     
-                    # Save parsed response
+                    # Save formatted response
+                    formatted_output = output_dir / f"{batch_file.stem}_batch_formatted.json"
+                    with open(formatted_output, 'w') as f:
+                        json.dump(batch_results, f, indent=2)
+                    
+                    # Save parsed response (content only)
                     parsed_output = output_dir / f"parsed_{batch_file.stem}_batch_response.jsonl"
                     with open(parsed_output, 'w') as f:
                         if service == "openai":
