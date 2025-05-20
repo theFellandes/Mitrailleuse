@@ -92,11 +92,14 @@
       }
     },
 
-    "check_similarity": true,
-    "similarity_settings": {
-      "similarity_threshold": 0.8,
-      "cooldown_period": 300,
-      "max_recent_responses": 100
+    "similarity_check": {
+      "enabled": false,
+      "settings": {
+        "similarity_threshold": 0.8,
+        "cooldown_period": 300,
+        "max_recent_responses": 100,
+        "close_after_use": false
+      }
     }
   }
 }

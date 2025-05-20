@@ -19,7 +19,8 @@
             "is_batch_active": true,
             "batch_size": 5,
             "batch_check_time": 120,
-            "combine_batches": false
+            "combine_batches": false,
+            "file_batch": false
         }
     },
     "general": {
@@ -36,12 +37,14 @@
             "enable_sampling": false,
             "sample_size": 50
         },
-        "check_similarity": true,
-        "similarity_settings": {
-            "close_after_use": false,
-            "similarity_threshold": 0.8,
-            "cooldown_period": 300,
-            "max_recent_responses": 100
+        "similarity_check": {
+            "enabled": false,
+            "settings": {
+                "similarity_threshold": 0.8,
+                "cooldown_period": 300,
+                "max_recent_responses": 100,
+                "close_after_use": false
+            }
         }
     }
 } 
