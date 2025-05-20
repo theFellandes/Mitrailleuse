@@ -13,11 +13,11 @@ import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import math
 import deepl
-from ..infrastructure.utils.file_converter import FileConverter
-from ..infrastructure.utils.cache_manager import CacheManager
-from ..infrastructure.utils.file_flattener import FileFlattener
-from ..infrastructure.utils.logger import get_logger
-from ..infrastructure.utils.similarity_checker import SimilarityChecker
+from mitrailleuse.infrastructure.utils.file_converter import FileConverter
+from mitrailleuse.infrastructure.utils.cache_manager import CacheManager
+from mitrailleuse.infrastructure.utils.file_flattener import FileFlattener
+from mitrailleuse.infrastructure.utils.logger import get_logger
+from mitrailleuse.infrastructure.utils.similarity_checker import SimilarityChecker
 
 # Configure logging
 logging.basicConfig(
@@ -72,9 +72,6 @@ class SimpleClient:
         
         # Initialize cache manager
         self.cache_manager = CacheManager(self.base_path, self.config)
-
-        # Initialize logger
-        self.logger = get_logger("simple_client", self.config)
         
         # Initialize file flattener
         self.file_flattener = FileFlattener(self.base_path, self.config)
@@ -83,7 +80,7 @@ class SimpleClient:
         self.similarity_checker = None
         if self._check_similarity_enabled():
             self.similarity_checker = SimilarityChecker(self.base_path, self.config)
-            self.logger.info("Similarity checking enabled")
+            logger.info("Similarity checking enabled")
 
     def _load_config(self, config_path: Union[str, Path]) -> Dict:
         """Load configuration from JSON file."""
@@ -309,28 +306,228 @@ class SimpleClient:
         
         return base_cap
 
-    def _process_single_file(self, input_file: Path, service: str = "openai") -> Dict:
-        """Process a single file and return the result."""
-        try:
-            return self.process_single_file(input_file, service)
-        except Exception as e:
-            logger.error(f"Error processing {input_file.name}: {str(e)}")
-            return {"error": str(e)}
-
-    def _process_batch_file(self, input_file: Path, service: str = "openai") -> List[Dict]:
-        """Process a batch file and return the results."""
-        try:
-            return self.process_batch(input_file, service)
-        except Exception as e:
-            logger.error(f"Error processing batch {input_file.name}: {str(e)}")
-            return [{"error": str(e)}]
-
     def _check_similarity_enabled(self) -> bool:
         """Check if similarity checking is enabled in config."""
         try:
             return bool(self.config["general"]["check_similarity"])
         except (KeyError, TypeError):
             return False
+
+    def _should_close_similarity_checker(self) -> bool:
+        """Check if similarity checker should be closed after each use."""
+        try:
+            return bool(self.config["general"]["similarity_settings"]["close_after_use"])
+        except (KeyError, TypeError):
+            return True  # Default to True for safety
+
+    def _process_single_file(self, input_file: Union[str, Path], service: str, base_path: Union[str, Path], config: Dict) -> Dict:
+        """Process a single file and return the result."""
+        try:
+            # Convert string paths back to Path objects
+            input_file = Path(input_file)
+            base_path = Path(base_path)
+            
+            # Initialize components for this process
+            cache_manager = CacheManager(base_path, config)
+            file_flattener = FileFlattener(base_path, config)
+            
+            # Initialize API client for this process
+            if service == "openai":
+                api_client = OpenAI(api_key=config["openai"]["api_key"])
+            elif service == "deepl":
+                api_client = deepl.Translator(config["deepl"]["api_key"])
+            
+            # Flatten the input file first
+            flattened_file = file_flattener.flatten_file(input_file)
+            
+            # Convert to JSONL for processing
+            jsonl_file = FileConverter.convert_to_jsonl(flattened_file, base_path)
+            
+            with open(jsonl_file, 'r') as f:
+                input_data = json.loads(f.readline().strip())
+
+            # Check cache first
+            cached_response = cache_manager.get(input_data, service)
+            if cached_response:
+                logger.info(f"Cache hit for {service} request")
+                return cached_response
+
+            # Initialize similarity checker only if needed
+            similarity_checker = None
+            if self._check_similarity_enabled():
+                similarity_checker = SimilarityChecker(base_path, config)
+                # Check cooldown if similarity checking is enabled
+                if similarity_checker.should_cooldown():
+                    cooldown_time = similarity_checker.get_cooldown_time()
+                    logger.warning(f"Cooldown active. Waiting {cooldown_time} seconds...")
+                    time.sleep(cooldown_time)
+
+            # Build and send request
+            request_body = self._build_request_body(input_data, service)
+            try:
+                if service == "openai":
+                    response = api_client.chat.completions.create(**request_body)
+                    result = {
+                        "input": input_data,
+                        "response": response.model_dump(),
+                        "timestamp": datetime.now().isoformat()
+                    }
+                elif service == "deepl":
+                    translation = api_client.translate_text(
+                        request_body["text"],
+                        target_lang=request_body["target_lang"],
+                        source_lang=request_body["source_lang"]
+                    )
+                    result = {
+                        "input": input_data,
+                        "response": {
+                            "translated_text": translation.text,
+                            "detected_source_lang": translation.detected_source_lang
+                        },
+                        "timestamp": datetime.now().isoformat()
+                    }
+                
+                # Check similarity if enabled
+                if similarity_checker:
+                    is_similar, similarity = similarity_checker.check_similarity(result["response"])
+                    if is_similar:
+                        cooldown_time = similarity_checker.get_cooldown_time()
+                        logger.warning(
+                            f"Similar response detected (similarity: {similarity:.2f}). "
+                            f"Applying cooldown of {cooldown_time} seconds."
+                        )
+                        time.sleep(cooldown_time)
+                
+                # Save to cache
+                cache_manager.set(input_data, result, service)
+                
+                # Save response
+                output_file = base_path / "outputs" / f"{input_file.stem}_{service}_response.json"
+                with open(output_file, 'w') as f:
+                    json.dump(result, f, indent=2)
+                
+                return result
+            except Exception as e:
+                logger.error(f"Error processing file {input_file} with {service}: {str(e)}")
+                raise
+            finally:
+                # Clean up
+                if similarity_checker:
+                    similarity_checker.close()
+                cache_manager.close()
+        except Exception as e:
+            logger.error(f"Error processing {input_file.name}: {str(e)}")
+            return {"error": str(e)}
+
+    def _process_batch_file(self, input_file: Union[str, Path], service: str, base_path: Union[str, Path], config: Dict) -> List[Dict]:
+        """Process a batch file and return the results."""
+        try:
+            # Convert string paths back to Path objects
+            input_file = Path(input_file)
+            base_path = Path(base_path)
+            
+            # Initialize components for this process
+            cache_manager = CacheManager(base_path, config)
+            file_flattener = FileFlattener(base_path, config)
+            
+            # Initialize API client for this process
+            if service == "openai":
+                api_client = OpenAI(api_key=config["openai"]["api_key"])
+            elif service == "deepl":
+                api_client = deepl.Translator(config["deepl"]["api_key"])
+            
+            # Flatten the input file first
+            flattened_file = file_flattener.flatten_file(input_file)
+            
+            # Convert to JSONL and process
+            jsonl_file = FileConverter.convert_to_jsonl(flattened_file, base_path)
+            batch_size = config["openai"]["batch"]["batch_size"] if service == "openai" else config["deepl"].get("batch_size", 50)
+            batch_files = self._split_into_batches(jsonl_file, batch_size)
+            
+            results = []
+            for batch_file in batch_files:
+                try:
+                    with open(batch_file, 'r') as f:
+                        batch_data = [json.loads(line) for line in f if line.strip()]
+                    
+                    batch_results = []
+                    for item in batch_data:
+                        # Check cache first
+                        cached_response = cache_manager.get(item, service)
+                        if cached_response:
+                            batch_results.append(cached_response)
+                            continue
+
+                        # Initialize similarity checker only if needed
+                        similarity_checker = None
+                        if self._check_similarity_enabled():
+                            similarity_checker = SimilarityChecker(base_path, config)
+                            # Check cooldown if similarity checking is enabled
+                            if similarity_checker.should_cooldown():
+                                cooldown_time = similarity_checker.get_cooldown_time()
+                                logger.warning(f"Cooldown active. Waiting {cooldown_time} seconds...")
+                                time.sleep(cooldown_time)
+
+                        # Build and send request
+                        request_body = self._build_request_body(item, service)
+                        if service == "openai":
+                            response = api_client.chat.completions.create(**request_body)
+                            result = {
+                                "input": item,
+                                "response": response.model_dump(),
+                                "timestamp": datetime.now().isoformat()
+                            }
+                        elif service == "deepl":
+                            translation = api_client.translate_text(
+                                request_body["text"],
+                                target_lang=request_body["target_lang"],
+                                source_lang=request_body["source_lang"]
+                            )
+                            result = {
+                                "input": item,
+                                "response": {
+                                    "translated_text": translation.text,
+                                    "detected_source_lang": translation.detected_source_lang
+                                },
+                                "timestamp": datetime.now().isoformat()
+                            }
+                        
+                        # Check similarity if enabled
+                        if similarity_checker:
+                            is_similar, similarity = similarity_checker.check_similarity(result["response"])
+                            if is_similar:
+                                cooldown_time = similarity_checker.get_cooldown_time()
+                                logger.warning(
+                                    f"Similar response detected (similarity: {similarity:.2f}). "
+                                    f"Applying cooldown of {cooldown_time} seconds."
+                                )
+                                time.sleep(cooldown_time)
+                        
+                        # Save to cache
+                        cache_manager.set(item, result, service)
+                        batch_results.append(result)
+                        
+                        # Clean up similarity checker after each item
+                        if similarity_checker:
+                            similarity_checker.close()
+                    
+                    # Save batch results
+                    output_file = base_path / "outputs" / f"{batch_file.stem}_{service}_responses.json"
+                    with open(output_file, 'w') as f:
+                        json.dump(batch_results, f, indent=2)
+                    
+                    results.extend(batch_results)
+                    
+                except Exception as e:
+                    logger.error(f"Error processing batch {batch_file} with {service}: {str(e)}")
+                    raise
+            return results
+        except Exception as e:
+            logger.error(f"Error processing batch {input_file.name}: {str(e)}")
+            return [{"error": str(e)}]
+        finally:
+            # Clean up
+            cache_manager.close()
 
     def process_single_file(self, input_file: Union[str, Path], service: str = "openai") -> Dict:
         """Process a single input file using the specified service."""
@@ -518,13 +715,23 @@ class SimpleClient:
         is_batch_active = self.openai_is_batch_active if service == "openai" else self.deepl_is_batch_active
         combine_batches = self.openai_combine_batches if service == "openai" else self.deepl_combine_batches
         
-        if is_batch_active:
-            # Process in batch mode
-            with ProcessPoolExecutor(max_workers=num_processes) as executor:
-                futures = {executor.submit(self._process_batch_file, f, service): f for f in input_files}
+        # Create a pool of workers
+        with ProcessPoolExecutor(max_workers=num_processes) as executor:
+            if is_batch_active:
+                # Process in batch mode
+                futures = []
+                for input_file in input_files:
+                    # Pass only the necessary data to the worker process
+                    future = executor.submit(
+                        self._process_batch_file,
+                        str(input_file),  # Convert Path to string
+                        service,
+                        str(self.base_path),  # Convert Path to string
+                        self.config  # Pass config dict
+                    )
+                    futures.append((future, input_file))
                 
-                for future in as_completed(futures):
-                    input_file = futures[future]
+                for future, input_file in futures:
                     try:
                         batch_results = future.result()
                         if not combine_batches:
@@ -543,13 +750,21 @@ class SimpleClient:
                     except Exception as e:
                         logger.error(f"Error processing {input_file.name} with {service}: {str(e)}")
                         results[input_file.name] = {"error": str(e)}
-        else:
-            # Process in single mode
-            with ProcessPoolExecutor(max_workers=num_processes) as executor:
-                futures = {executor.submit(self._process_single_file, f, service): f for f in input_files}
+            else:
+                # Process in single mode
+                futures = []
+                for input_file in input_files:
+                    # Pass only the necessary data to the worker process
+                    future = executor.submit(
+                        self._process_single_file,
+                        str(input_file),  # Convert Path to string
+                        service,
+                        str(self.base_path),  # Convert Path to string
+                        self.config  # Pass config dict
+                    )
+                    futures.append((future, input_file))
                 
-                for future in as_completed(futures):
-                    input_file = futures[future]
+                for future, input_file in futures:
                     try:
                         result = future.result()
                         results[input_file.name] = result

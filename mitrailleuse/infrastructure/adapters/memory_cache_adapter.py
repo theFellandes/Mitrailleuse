@@ -1,6 +1,6 @@
 import hashlib
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Callable
 from mitrailleuse.application.ports.cache_port import CachePort
 from mitrailleuse.infrastructure.logging.logger import get_logger
 
@@ -20,33 +20,34 @@ class MemoryCache(CachePort):
         sorted_data = json.dumps(data, sort_keys=True)
         return hashlib.sha256(sorted_data.encode()).hexdigest()
     
-    def get(self, key: str) -> Optional[Any]:
+    def get(self, key: Any) -> Optional[Any]:
         """Get a value from the cache."""
-        if key in self._cache:
+        cache_key = self._generate_key(key)
+        if cache_key in self._cache:
             self._hits += 1
-            log.info(f"Cache hit for key: {key}")
-            return self._cache[key]
+            log.info(f"Cache hit for key: {cache_key}")
+            return self._cache[cache_key]
         self._misses += 1
-        log.info(f"Cache miss for key: {key}")
+        log.info(f"Cache miss for key: {cache_key}")
         return None
     
-    def set(self, key: str, value: Any) -> None:
+    def set(self, key: Any, value: Any) -> None:
         """Set a value in the cache."""
-        self._cache[key] = value
-        log.info(f"Cached value for key: {key}")
+        cache_key = self._generate_key(key)
+        self._cache[cache_key] = value
+        log.info(f"Cached value for key: {cache_key}")
     
-    def get_or_set(self, data: Dict[str, Any], compute_value: callable) -> Any:
-        """Get from cache or compute and cache the value."""
-        cache_key = self._compute_hash(data)
-        cached_value = self.get(cache_key)
-        
-        if cached_value is not None:
-            log.info(f"Using cached response for request: {cache_key}")
-            return cached_value
-        
-        # Compute new value
-        value = compute_value()
-        self.set(cache_key, value)
+    def has(self, key: Any) -> bool:
+        """Check if a key exists in the cache."""
+        cache_key = self._generate_key(key)
+        return cache_key in self._cache
+    
+    def get_or_set(self, key: Any, getter: Callable[[], Any]) -> Any:
+        """Get a value from cache or compute and set it."""
+        if self.has(key):
+            return self.get(key)
+        value = getter()
+        self.set(key, value)
         return value
     
     def clear(self) -> None:
@@ -62,4 +63,14 @@ class MemoryCache(CachePort):
             "hits": self._hits,
             "misses": self._misses,
             "size": len(self._cache)
-        } 
+        }
+    
+    def flush_to_disk(self) -> None:
+        """Memory cache doesn't need to flush to disk."""
+        pass
+    
+    def _generate_key(self, key: Any) -> str:
+        """Generate a cache key from the input."""
+        if isinstance(key, (str, int, float, bool)):
+            return str(key)
+        return hashlib.md5(json.dumps(key, sort_keys=True).encode()).hexdigest() 

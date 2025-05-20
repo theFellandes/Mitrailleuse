@@ -1,0 +1,47 @@
+{
+    "task_name": "openai_test",
+    "user_id": "user1",
+    "openai": {
+        "api_key": "YOUR_OPENAI_KEY",
+        "api_information": {
+            "model": "gpt-4",
+            "setting": {
+                "temperature": 0.7,
+                "max_tokens": 2000
+            }
+        },
+        "prompt": "input_text",
+        "system_instruction": {
+            "is_dynamic": false,
+            "system_prompt": ""
+        },
+        "batch": {
+            "is_batch_active": true,
+            "batch_size": 5,
+            "batch_check_time": 120,
+            "combine_batches": false
+        }
+    },
+    "general": {
+        "verbose": true,
+        "multiprocessing_enabled": true,
+        "num_processes": 4,
+        "process_cap_percentage": 75,
+        "logs": {
+            "log_file": "log.log",
+            "log_to_file": true,
+            "log_buffer_size": 10
+        },
+        "sampling": {
+            "enable_sampling": false,
+            "sample_size": 50
+        },
+        "check_similarity": true,
+        "similarity_settings": {
+            "close_after_use": false,
+            "similarity_threshold": 0.8,
+            "cooldown_period": 300,
+            "max_recent_responses": 100
+        }
+    }
+} 

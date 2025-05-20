@@ -1,8 +1,8 @@
 import json
-from typing import Dict
+from typing import Dict, Optional, Any
 
 from pathlib import Path
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from mitrailleuse.config.deepl_config import DeeplConfig
 from mitrailleuse.config.deepseek_config import DeepseekConfig
@@ -25,25 +25,87 @@ class Sampling(BaseModel):
     sample_size: int
 
 
+class SimilaritySettings(BaseModel):
+    close_after_use: bool = True
+    similarity_threshold: float = 0.8
+    cooldown_period: int = 300
+    max_recent_responses: int = 100
+
+
+class SystemInstruction(BaseModel):
+    is_dynamic: bool = False
+    system_prompt: str = ""
+
+
+class BatchConfig(BaseModel):
+    is_batch_active: bool = False
+    batch_size: int = 5
+    batch_check_time: int = 120
+    combine_batches: bool = False
+
+
+class APISettings(BaseModel):
+    temperature: float = 0.7
+    max_tokens: int = 2000
+
+
+class APIInformation(BaseModel):
+    model: str
+    setting: APISettings
+
+
+class ProxyConfig(BaseModel):
+    proxies_enabled: bool = False
+    http: Optional[str] = None
+    https: Optional[str] = None
+
+
+class BaseAPIConfig(BaseModel):
+    api_key: str
+    prompt: str = "input_text"
+    system_instruction: SystemInstruction = Field(default_factory=SystemInstruction)
+    api_information: APIInformation
+    batch: BatchConfig = Field(default_factory=BatchConfig)
+    bulk_save: int = 10
+    sleep_time: int = 0
+    proxies: ProxyConfig = Field(default_factory=ProxyConfig)
+
+
+class OpenAIConfig(BaseAPIConfig):
+    pass
+
+
+class DeepseekConfig(BaseAPIConfig):
+    pass
+
+
+class DeeplConfig(BaseModel):
+    api_key: str
+    target_lang: str = "EN-US"
+    text: str = "text"
+
+
 class GeneralConfig(BaseModel):
     verbose: bool
     sampling: Sampling
     logs: GeneralLoggingConfig
     multiprocessing_enabled: bool
     num_processes: int
+    process_cap_percentage: int = 75
     db: DBConfig
     check_similarity: bool
-    similarity_stop_action: bool
+    similarity_settings: SimilaritySettings = Field(default_factory=SimilaritySettings)
 
 
 class Config(BaseModel):
     task_name: str
+    user_id: str
     openai: OpenAIConfig
     deepseek: DeepseekConfig
     deepl: DeeplConfig
     general: GeneralConfig
 
-    def deep_update(self, base_dict: Dict, update_dict: Dict) -> Dict:
+    def deep_update(self, base_dict: Dict[str, Any], update_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Recursively update a dictionary with another dictionary."""
         result = base_dict.copy()
 
@@ -91,9 +153,9 @@ class Config(BaseModel):
         Writes a Config instance to the specified config file in JSON format.
         """
         with open(config_file, 'w', encoding=encoding) as file:
-            json.dump(config.dict(), file, indent=4, ensure_ascii=False)
+            json.dump(config.model_dump(), file, indent=4, ensure_ascii=False)
 
-    def find_task_names(self, data, parent_key='', result=None):
+    def find_task_names(self, data: Any, parent_key: str = '', result: list = None) -> list:
         if result is None:
             result = []
 

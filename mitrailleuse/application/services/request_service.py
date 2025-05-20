@@ -10,22 +10,22 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 import multiprocessing
 
-from .task_service import TaskService
-from ... import mitrailleuse_pb2
-from ...application.ports.api_port import APIPort
-from ...application.ports.cache_port import CachePort
-from ...config.config import Config
-from ...domain.models import Task, TaskStatus
-from ...infrastructure.adapters.deepl_adapter import DeepLAdapter
-from ...infrastructure.adapters.deepseek_adapter import DeepSeekAdapter
-from ...infrastructure.adapters.file_cache_adapter import FileCache
-from ...infrastructure.adapters.openai_adapter import OpenAIAdapter
-from ...infrastructure.adapters.memory_cache_adapter import MemoryCache
-from ...infrastructure.logging.logger import get_logger
-from ...infrastructure.utils.mp_pool import pick_num_processes
-from ...infrastructure.utils.file_converter import FileConverter
-from ...infrastructure.utils.file_flattener import FileFlattener
-from ...infrastructure.utils.similarity_checker import SimilarityChecker
+from mitrailleuse import mitrailleuse_pb2
+from mitrailleuse.application.services.task_service import TaskService
+from mitrailleuse.application.ports.api_port import APIPort
+from mitrailleuse.application.ports.cache_port import CachePort
+from mitrailleuse.config.config import Config
+from mitrailleuse.domain.models import Task, TaskStatus
+from mitrailleuse.infrastructure.adapters.deepl_adapter import DeepLAdapter
+from mitrailleuse.infrastructure.adapters.deepseek_adapter import DeepSeekAdapter
+from mitrailleuse.infrastructure.adapters.file_cache_adapter import FileCache
+from mitrailleuse.infrastructure.adapters.openai_adapter import OpenAIAdapter
+from mitrailleuse.infrastructure.adapters.memory_cache_adapter import MemoryCache
+from mitrailleuse.infrastructure.logging.logger import get_logger
+from mitrailleuse.infrastructure.utils.mp_pool import pick_num_processes
+from mitrailleuse.infrastructure.utils.file_converter import FileConverter
+from mitrailleuse.infrastructure.utils.file_flattener import FileFlattener
+from mitrailleuse.infrastructure.utils.similarity_checker import SimilarityChecker
 
 log = get_logger(__name__)
 

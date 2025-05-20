@@ -5,21 +5,24 @@
 > Mitrailleuse is an extensible micro‑service that orchestrates high‑throughput requests to multiple generative‑AI providers (OpenAI, DeepSeek, DeepL) while providing a consistent gRPC interface, pluggable adapters, dynamic prompt mapping, and first‑class batch support.
 ---
 
-## ✨ Key features
+## ✨ Key features
 
 | Capability            | Details                                                                                                                     |
 | --------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| 🗂️ Task folders      | Every call lives under `tasks/<user_id>/<api>_<task>_<timestamp>/` (inputs, outputs, logs, config).                         |
-| 📡 Multi‑provider     | Switch between `openai`, `deepseek`, `deepl` by setting `api` in the task JSON or `--api` on the CLI.                       |
-| 🚀 gRPC service       | Exposes `CreateTask`, `SendSingle`, `CreateBatch`, `CheckBatchStatus`, `DownloadBatchResults`. Reflection & health enabled. |
-| 🐳 Docker‑ready       | Single `mitrailleuse-grpc` image builds from `Dockerfile`, spun up via `docker‑compose`.                                    |
-| 🔍 Sampling           | `config.general.sampling` lets you process the first *N* lines for quick dry‑runs.                                          |
-| 🧩 Adapters           | New providers drop in via `Adapters` registry with `send_single` / `send_batch`.                                            |
-| 📜 Standalone clients | `create_task.py`, `send_single.py`, `batch_workflow.py` for scripting and CI.                                               |
+| 🗂️ Task folders      | Every call lives under `tasks/<user_id>/<api>_<task>_<timestamp>/` (inputs, outputs, logs, config).                         |
+| 📡 Multi‑provider     | Switch between `openai`, `deepseek`, `deepl` by setting `api` in the task JSON or `--api` on the CLI.                       |
+| 🚀 gRPC service       | Exposes `CreateTask`, `SendSingle`, `CreateBatch`, `CheckBatchStatus`, `DownloadBatchResults`. Reflection & health enabled. |
+| 🐳 Docker‑ready       | Single `mitrailleuse-grpc` image builds from `Dockerfile`, spun up via `docker‑compose`.                                    |
+| 🔍 Sampling           | `config.general.sampling` lets you process the first *N* lines for quick dry‑runs.                                          |
+| 🧩 Adapters           | New providers drop in via `Adapters` registry with `send_single` / `send_batch`.                                            |
+| 📜 CLI Interface      | New command-line interface for task management and execution.                                                               |
+| 🔄 File Flattening    | Automatic flattening of nested JSON structures for consistent processing.                                                   |
+| 🔍 Similarity Check   | Configurable similarity checking to prevent duplicate responses.                                                            |
+| 💾 Caching            | In-memory and file-based caching for improved performance.                                                                  |
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ Architecture
 ```
            +------------------------------+
            |           Clients            |
@@ -48,29 +51,40 @@
                +------------------+
 ```
 
-
-## 🏁 Quick start
+## Quick start
 
 ### Prerequisites
 
-* Python 3.12+
-
-* Docker 24.x (optional but recommended)
-
+* Python 3.12+
+* Docker 24.x (optional but recommended)
 * Provider API keys in config.json
 
-### 1 · Clone & build
+### 1 · Clone & build
 
 ```bash
 # clone
- git clone https://github.com/theFellandes/mitrailleuse.git
- cd mitrailleuse
+git clone https://github.com/theFellandes/mitrailleuse.git
+cd mitrailleuse
 
-# build the gRPC server image
- docker compose build mitrailleuse-grpc
+# Create and activate virtual environment
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# Install package in development mode
+pip install -e .
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Generate gRPC stubs
+python -m grpc_tools.protoc -I. \
+  --python_out=. --grpc_python_out=. mitrailleuse/proto/mitrailleuse.proto
+
+# build the gRPC server image (if using Docker)
+docker compose build mitrailleuse-grpc
 ```
 
-### 2 · Set API keys
+### 2 · Set API keys
 
 Create `.env` in the repo root:
 
@@ -80,15 +94,22 @@ DEEPSEEK_API_KEY=dsk‑...
 DEEPL_API_KEY=dpa‑...
 ```
 
-### 3 · Run the stack
+### 3 · Run the stack
 
+#### Option 1: Run directly with Python
+```bash
+# Start the gRPC server
+python -m mitrailleuse.infrastructure.grpc.server
+```
+
+#### Option 2: Run with Docker
 ```bash
 docker compose up -d mitrailleuse-grpc
 ```
 
 The server listens on **`localhost:50051`** (gRPC, plaintext).
 
-### 4 · Smoke test
+### 4 · Smoke test
 
 ```bash
 grpcurl -plaintext localhost:50051 list
@@ -98,7 +119,7 @@ Should list `mitrailleuse.MitrailleuseService`.
 
 ---
 
-## 🔧 Configuration files
+## 🔧 Configuration files
 
 ### `config.json` template
 
@@ -106,7 +127,13 @@ Should list `mitrailleuse.MitrailleuseService`.
 {
   "general": {
     "verbose": true,
-    "sampling": { "enable_sampling": true, "sample_size": 100 }
+    "sampling": { "enable_sampling": true, "sample_size": 100 },
+    "check_similarity": true,
+    "similarity_settings": {
+      "similarity_threshold": 0.8,
+      "cooldown_period": 300,
+      "max_recent_responses": 100
+    }
   },
 
   "openai": {
@@ -115,7 +142,13 @@ Should list `mitrailleuse.MitrailleuseService`.
       "is_dynamic": true,
       "system_prompt": "instructions"
     },
-    "api_information": { "model": "gpt-4o-mini" }
+    "api_information": { "model": "gpt-4o-mini" },
+    "batch": {
+      "is_batch_active": true,
+      "batch_size": 20,
+      "batch_check_time": 120,
+      "combine_batches": false
+    }
   },
 
   "deepseek": {
@@ -124,7 +157,13 @@ Should list `mitrailleuse.MitrailleuseService`.
       "is_dynamic": true,
       "system_prompt": "instructions"
     },
-    "api_information": { "model": "deepseek-chat" }
+    "api_information": { "model": "deepseek-chat" },
+    "batch": {
+      "is_batch_active": true,
+      "batch_size": 20,
+      "batch_check_time": 120,
+      "combine_batches": false
+    }
   },
 
   "deepl": {
@@ -137,43 +176,71 @@ Should list `mitrailleuse.MitrailleuseService`.
 
 ---
 
-## 🖥️ Standalone CLI usage
+## 🖥️ CLI Usage
+
+The new CLI provides a more intuitive interface for task management:
 
 ```bash
-# 1. create a task folder
-python create_task.py --user alice --api openai --name demo \
-       --config configs/config.json
+# Make sure you're in the project root directory
+cd mitrailleuse
 
-# 2. send a single request
-python send_single.py --user alice --api deepseek \
-       --messages inputs/hello.json
+# Create a new task
+python -m mitrailleuse.main create --user-id user1 --api-name openai --task-name demo
 
-# 3. run and download an OpenAI batch
-python batch_workflow.py --user alice --api openai \
-       --jsonl inputs/batch_inputs.jsonl
+# List available tasks
+python -m mitrailleuse.main list --user-id user1
+
+# Get task information
+python -m mitrailleuse.main get --task-path /path/to/task
+
+# Execute a task
+python -m mitrailleuse.main execute --user-id user1 --task-folder /path/to/task
 ```
 
-> **Note:** DeepSeek mirrors OpenAI’s chat endpoint, but currently has *no* batch API; `batch_workflow` exits early for `--api deepseek`. DeepL supports single‑shot translation only.
+### CLI Features
+
+* Task creation with custom configuration
+* Task listing and status monitoring
+* Batch job tracking and status updates
+* Support for all providers (OpenAI, DeepSeek, DeepL)
+* Automatic file flattening and format conversion
+* Similarity checking to prevent duplicate responses
+* Caching for improved performance
 
 ---
 
-## 🗄️ Directory structure (runtime)
+## 🗄️ Directory structure (runtime)
 
 ```
 mitrailleuse/
+├─ mitrailleuse/
+│   ├─ proto/
+│   │   ├─ mitrailleuse.proto
+│   │   ├─ mitrailleuse_pb2.py
+│   │   └─ mitrailleuse_pb2_grpc.py
+│   ├─ infrastructure/
+│   │   ├─ grpc/
+│   │   │   └─ server.py
+│   │   └─ ...
+│   └─ ...
 ├─ tasks/
 │   └─ alice/
 │       └─ openai_demo_03_05_2025_142530/
 │           ├─ config/config.json
-│           ├─ inputs/...
-│           ├─ outputs/...
-│           └─ logs/app.log
+│           ├─ inputs/
+│           │   ├─ backup/
+│           │   └─ ...
+│           ├─ outputs/
+│           ├─ cache/
+│           └─ logs/
+│               ├─ app.log
+│               └─ batch.log
 └─ ...
 ```
 
 ---
 
-## 🛰️ gRPC API reference (proto excerpt)
+## 🛰️ gRPC API reference (proto excerpt)
 
 ```proto
 service MitrailleuseService {
@@ -189,7 +256,7 @@ service MitrailleuseService {
 
 ---
 
-## 🐳 Docker compose
+## 🐳 Docker compose
 
 ```yaml
 services:
@@ -204,7 +271,7 @@ services:
 
 ---
 
-## 🧪 Development & testing
+## 🧪 Development & testing
 
 ```bash
 python -m venv .venv
@@ -223,17 +290,19 @@ python -m grpc_tools.protoc -I. \
 
 ---
 
-## 📜 License
+## 📜 License
 
 MIT – see `LICENSE`.
 
 ---
 
-## 🗺️ Roadmap
+## 🗺️ Roadmap
 
-* \[ ] DeepSeek batch support when API ships
-* \[ ] Streaming gRPC endpoint
-* \[ ] Web dashboard for task monitoring
-* \[ ] Kubernetes Helm chart
+* [ ] DeepSeek batch support when API ships
+* [ ] Streaming gRPC endpoint
+* [ ] Web dashboard for task monitoring
+* [ ] Kubernetes Helm chart
+* [ ] Enhanced similarity checking with more algorithms
+* [ ] Support for more AI providers
 
-Contributions welcome — see `CONTRIBUTING.md`.
+Contributions welcome — see `CONTRIBUTING.md`.

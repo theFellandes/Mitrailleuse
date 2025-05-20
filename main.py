@@ -10,7 +10,7 @@ import time
 import grpc
 import argparse
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from mitrailleuse import mitrailleuse_pb2, mitrailleuse_pb2_grpc
 from mitrailleuse.config.config import Config
 from mitrailleuse.infrastructure.adapters.openai_adapter import OpenAIAdapter
@@ -43,7 +43,7 @@ class MitrailleuseCLI:
         print(f"✅ Task created at: {task_dir}")
         return task_dir
 
-    def list_tasks(self, user_id: str, task_name: Optional[str] = None) -> None:
+    def list_tasks(self, user_id: str, task_name: Optional[str] = None) -> List[Dict[str, Any]]:
         """List available tasks for a user."""
         response = self.stub.ListTasks(
             mitrailleuse_pb2.ListTasksRequest(
@@ -52,18 +52,44 @@ class MitrailleuseCLI:
             )
         )
         
+        tasks = []
         if not response.tasks:
             print("No tasks found.")
-            return
+            return tasks
 
         print("\nAvailable Tasks:")
         print("-" * 80)
-        for task in response.tasks:
-            print(f"Task Name: {task.task_name}")
-            print(f"API: {task.api_name}")
-            print(f"Status: {task.status}")
-            print(f"Path: {task.path}")
+        for i, task in enumerate(response.tasks, 1):
+            print(f"{i}. Task Name: {task.task_name}")
+            print(f"   API: {task.api_name}")
+            print(f"   Status: {task.status}")
+            print(f"   Path: {task.path}")
             print("-" * 80)
+            tasks.append({
+                "index": i,
+                "task_name": task.task_name,
+                "api_name": task.api_name,
+                "status": task.status,
+                "path": task.path
+            })
+        return tasks
+
+    def select_task(self, user_id: str, task_name: Optional[str] = None) -> Optional[str]:
+        """Select a task interactively."""
+        tasks = self.list_tasks(user_id, task_name)
+        if not tasks:
+            return None
+
+        while True:
+            try:
+                choice = int(input("\nSelect a task number (or 0 to cancel): "))
+                if choice == 0:
+                    return None
+                if 1 <= choice <= len(tasks):
+                    return tasks[choice - 1]["path"]
+                print("Invalid choice. Please try again.")
+            except ValueError:
+                print("Please enter a valid number.")
 
     def get_task_by_path(self, task_path: str) -> None:
         """Get task information from a specific path."""
@@ -86,8 +112,14 @@ class MitrailleuseCLI:
         print(f"Path: {response.path}")
         print("-" * 80)
 
-    def execute_task(self, user_id: str, task_folder: str) -> None:
+    def execute_task(self, user_id: str, task_folder: Optional[str] = None, task_name: Optional[str] = None) -> None:
         """Execute a task."""
+        if task_folder is None:
+            task_folder = self.select_task(user_id, task_name)
+            if task_folder is None:
+                print("No task selected.")
+                return
+
         response = self.stub.ExecuteTask(
             mitrailleuse_pb2.ExecuteTaskRequest(
                 user_id=user_id,
@@ -142,7 +174,8 @@ def main():
     # Execute task command
     execute_parser = subparsers.add_parser("execute", help="Execute a task")
     execute_parser.add_argument("--user-id", required=True, help="User ID")
-    execute_parser.add_argument("--task-folder", required=True, help="Path to task directory")
+    execute_parser.add_argument("--task-folder", help="Path to task directory")
+    execute_parser.add_argument("--task-name", help="Task name to select from")
 
     args = parser.parse_args()
     cli = MitrailleuseCLI()
@@ -161,7 +194,7 @@ def main():
             cli.get_task_by_path(args.task_path)
         
         elif args.command == "execute":
-            cli.execute_task(args.user_id, args.task_folder)
+            cli.execute_task(args.user_id, args.task_folder, args.task_name)
         
         else:
             parser.print_help()
