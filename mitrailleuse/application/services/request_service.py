@@ -5,8 +5,10 @@ import random
 import threading
 import time
 import uuid
+import shutil
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
+import multiprocessing
 
 from .task_service import TaskService
 from ... import mitrailleuse_pb2
@@ -18,8 +20,10 @@ from ...infrastructure.adapters.deepl_adapter import DeepLAdapter
 from ...infrastructure.adapters.deepseek_adapter import DeepSeekAdapter
 from ...infrastructure.adapters.file_cache_adapter import FileCache
 from ...infrastructure.adapters.openai_adapter import OpenAIAdapter
+from ...infrastructure.adapters.memory_cache_adapter import MemoryCache
 from ...infrastructure.logging.logger import get_logger
 from ...infrastructure.utils.mp_pool import pick_num_processes
+from ...infrastructure.utils.file_converter import FileConverter
 
 log = get_logger(__name__)
 
@@ -37,13 +41,12 @@ class RequestService:
     def __init__(self, api: APIPort, cache: CachePort, config: Config):
         self.api = api
         self.cache = cache
+        self.memory_cache = MemoryCache()  # Add in-memory cache
         self.config = config
 
         # ── derive the task-name once, for all filenames ───────────────────
-        # preferred: explicit field in Config
         self.task_name: str | None = getattr(config, "task_name", None)
 
-        # fallback ① – nested under ".task.task_name"
         if not self.task_name:
             self.task_name = (
                 getattr(config, "task", {}).get("task_name", None)
@@ -51,9 +54,7 @@ class RequestService:
                 else None
             )
 
-        # fallback ② – last segment of the working-directory path
         if not self.task_name:
-            # assume Config has a "workdir" or similar path attribute
             workdir = Path(getattr(config, "workdir", ".")).resolve()
             self.task_name = workdir.name.split("_", 1)[0] or "task"
 
@@ -83,20 +84,77 @@ class RequestService:
         stem = input_file.stem  # e.g. 'input_2'
         return f"{lang}_{task_name}_{stem}_{size}.jsonl"
 
-    def _send_single(self, file_path: Path):
-        user_payload = json.loads(file_path.read_text())
+    def _backup_input_file(self, input_file: Path, base_path: Path) -> None:
+        """Backup the input file to the backup directory."""
+        backup_dir = base_path / "inputs" / "backup"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_file = backup_dir / f"{input_file.stem}_{timestamp}{input_file.suffix}"
+        shutil.copy2(input_file, backup_file)
+        log.info(f"Backed up input file to: {backup_file}")
 
-        # Choose provider‑specific body
+    def _convert_to_jsonl(self, input_file: Path, base_path: Path) -> Path:
+        """Convert JSON file to JSONL format if needed and backup original."""
+        # Backup the original file
+        self._backup_input_file(input_file, base_path)
+        
+        if input_file.suffix == '.jsonl':
+            return input_file
+
+        output_file = input_file.with_suffix('.jsonl')
+        with open(input_file, 'r') as f:
+            data = json.load(f)
+        
+        if not isinstance(data, list):
+            data = [data]
+
+        with open(output_file, 'w') as f:
+            for item in data:
+                f.write(json.dumps(item) + '\n')
+        
+        log.info(f"Converted {input_file} to JSONL format")
+        return output_file
+
+    def _convert_to_json(self, input_file: Path, base_path: Path) -> Path:
+        """Convert JSONL file to JSON format if needed and backup original."""
+        # Backup the original file
+        self._backup_input_file(input_file, base_path)
+        
+        if input_file.suffix == '.json':
+            return input_file
+
+        output_file = input_file.with_suffix('.json')
+        with open(input_file, 'r') as f:
+            data = [json.loads(line) for line in f if line.strip()]
+
+        with open(output_file, 'w') as f:
+            json.dump(data, f, indent=2)
+        
+        log.info(f"Converted {input_file} to JSON format")
+        return output_file
+
+    def _send_single(self, file_path: Path, base_path: Path):
+        """Process a single file with backup and format conversion."""
+        # Convert to JSONL for processing
+        jsonl_file = FileConverter.convert_to_jsonl(file_path, base_path)
+        user_payload = json.loads(jsonl_file.read_text())
+
+        # Choose provider-specific body
         if isinstance(self.api, DeepLAdapter):
-            body_or_payload = user_payload  # DeepL maps internally
+            body_or_payload = user_payload
         else:
             body_or_payload = self._build_openai_body(user_payload)
 
-        log.info(f"Sending request for {file_path.name}")
-        response = self.api.send_single(body_or_payload)
+        # Try to get from memory cache first
+        def send_request():
+            log.info(f"Sending request for {file_path.name}")
+            return self.api.send_single(body_or_payload)
 
-        # Return both the path and response; the parent process will
-        # write the file to disk to avoid path‑scope issues inside workers.
+        response = self.memory_cache.get_or_set(body_or_payload, send_request)
+        
+        # Also update the file cache
+        self.cache.set(file_path.name, response)
+
         return file_path, response
 
     @staticmethod
@@ -233,23 +291,61 @@ class RequestService:
                 time.sleep(interval)
 
     # ---------------------------------------------------------- main
+    def _calculate_process_cap(self, cfg) -> int:
+        """Calculate the maximum number of processes to use."""
+        try:
+            # Get system CPU count
+            cpu_count = multiprocessing.cpu_count()
+            
+            # Get process cap percentage from config
+            cap_percentage = getattr(cfg.general, "process_cap_percentage", 75)
+            base_cap = max(1, math.floor(cpu_count * (cap_percentage / 100)))
+            
+            # Get config override if exists
+            config_cap = getattr(cfg.general, "num_processes", None)
+            if config_cap is not None:
+                return min(config_cap, base_cap)
+            
+            return base_cap
+        except (AttributeError, TypeError):
+            # Fallback to dict-style access
+            try:
+                cap_percentage = cfg["general"]["process_cap_percentage"]
+                base_cap = max(1, math.floor(cpu_count * (cap_percentage / 100)))
+                config_cap = cfg["general"].get("num_processes")
+                if config_cap is not None:
+                    return min(config_cap, base_cap)
+                return base_cap
+            except (KeyError, TypeError):
+                return max(1, math.floor(cpu_count * 0.75))  # Default to 75%
+
+    def _should_combine_batches(self, cfg) -> bool:
+        """Check if batches should be combined based on config."""
+        try:
+            # Try object-style access
+            return bool(cfg.openai.batch.combine_batches)
+        except (AttributeError, TypeError):
+            # Try dict-style access
+            try:
+                return bool(cfg["openai"]["batch"]["combine_batches"])
+            except (KeyError, TypeError):
+                return False
+
     def execute(self, task: Task, base_path: Path) -> str | None:
         """Return job_id when batch is launched else None."""
         task.status = TaskStatus.RUNNING
         log.info(f"Executing task: {task.task_name} in {base_path}")
 
         # Create necessary directories
+        FileConverter.ensure_directory_structure(base_path)
         inputs_path = base_path / "inputs"
         outputs_path = base_path / "outputs"
         logs_path = base_path / "logs"
         cache_path = base_path / "cache"
 
-        inputs_path.mkdir(parents=True, exist_ok=True)
-        outputs_path.mkdir(parents=True, exist_ok=True)
-        logs_path.mkdir(parents=True, exist_ok=True)
-        cache_path.mkdir(parents=True, exist_ok=True)
-
-        files = list(inputs_path.glob("*.json"))
+        # Get all JSON and JSONL files
+        files = list(inputs_path.glob("*.json")) + list(inputs_path.glob("*.jsonl"))
+        
         if self._sampling_enabled(self.config):
             log.info("Sampling enabled, creating JSONL file")
             limit = self._sample_size(self.config)
@@ -262,13 +358,32 @@ class RequestService:
             task.status = TaskStatus.FAILED
             return None
 
+        # Calculate number of processes to use
+        n_proc = min(len(files), self._calculate_process_cap(self.config))
+        log.info(f"Using {n_proc} processes for processing")
+
         # ---------------- batch mode
         if self._is_batch_enabled(self.config):
             log.info("Using batch mode for request")
-            payloads = [
-                self._build_openai_body(json.loads(f.read_text()))
-                for f in files
-            ]
+            
+            # Process each file through memory cache
+            payloads = []
+            for f in files:
+                # Convert to JSONL and backup
+                jsonl_file = FileConverter.convert_to_jsonl(f, base_path)
+                user_payload = json.loads(jsonl_file.read_text())
+                
+                if isinstance(self.api, DeepLAdapter):
+                    body = user_payload
+                else:
+                    body = self._build_openai_body(user_payload)
+                
+                # Try to get from memory cache first
+                def send_request():
+                    return self.api.send_single(body)
+                
+                response = self.memory_cache.get_or_set(body, send_request)
+                payloads.append(response)
 
             try:
                 job_obj = self.api.send_batch(payloads)
@@ -280,11 +395,24 @@ class RequestService:
                 # Start the tracking thread
                 tracking_thread = threading.Thread(
                     target=self._track_batch_job,
-                    args=(job_obj, base_path, self.task_name),  # ← always filled
+                    args=(job_obj, base_path, self.task_name),
                     daemon=True
                 )
                 tracking_thread.start()
                 log.info(f"Started batch tracking thread for job {job_obj['id']}")
+
+                # Save batch results based on combine_batches setting
+                if not self._should_combine_batches(self.config):
+                    # Save each batch result separately
+                    for i, payload in enumerate(payloads):
+                        output_file = outputs_path / f"batch_{i}_response.json"
+                        with open(output_file, 'w') as f:
+                            json.dump(payload, f, indent=2)
+                else:
+                    # Combine all batch results
+                    output_file = outputs_path / "batch_responses.json"
+                    with open(output_file, 'w') as f:
+                        json.dump(payloads, f, indent=2)
 
                 task.status = TaskStatus.SUCCESS
                 log.info(f"Batch job created with ID: {job_obj['id']}")
@@ -297,13 +425,11 @@ class RequestService:
 
         # --------------- single-shot (maybe multiproc)
         log.info("Using direct request mode")
-        n_proc = pick_num_processes(self.config)
-        log.info(f"Using {n_proc} processes for direct requests")
-
+        
         try:
             outputs_path.mkdir(parents=True, exist_ok=True)
             with ProcessPoolExecutor(max_workers=n_proc) as pool:
-                futures = {pool.submit(self._send_single, f): f for f in files}
+                futures = {pool.submit(self._send_single, f, base_path): f for f in files}
                 for fut in as_completed(futures):
                     try:
                         fname, resp = fut.result()
@@ -368,10 +494,10 @@ class RequestService:
     # ------------------------------------------------------------------
     def _build_openai_body(self, payload: dict) -> dict:
         """
-        Build chat‑completion body for **both OpenAI and DeepSeek** using the
-        mapping rules stored in the task’s config:
+        Build chat-completion body for both OpenAI and DeepSeek using the
+        mapping rules stored in the task's config:
 
-          config.prompt            → name of user‑prompt field  (default: "user_prompt")
+          config.prompt            → name of user-prompt field  (default: "input_text")
           config.system_instruction.is_dynamic
               false  → system prompt = "You are a helpful assistant"
               true   → payload[config.system_instruction.system_prompt]
@@ -381,8 +507,8 @@ class RequestService:
         # ---------------- helpers ----------------
         def cfg_get(path: str, default=None):
             """
-            Dot‑path getter that works on either pydantic objects or dicts.
-            Looks first under a provider section (openai/deepseek), then top‑level.
+            Dot-path getter that works on either pydantic objects or dicts.
+            Looks first under a provider section (openai/deepseek), then top-level.
             """
             providers = ("openai", "deepseek")  # order of preference
             for root in providers + ("",):
@@ -403,19 +529,25 @@ class RequestService:
             return default
 
         # ---------------- mapping keys ----------------
-        prompt_key = cfg_get("prompt", "user_prompt")
+        prompt_key = cfg_get("prompt", "input_text")
         is_dyn = bool(cfg_get("system_instruction.is_dynamic", False))
         sys_prompt_key = cfg_get("system_instruction.system_prompt", "instructions")
 
         # ---------------- build message list ----------------
-        user_content = payload.get(prompt_key, "")
+        user_content = payload.get(prompt_key)
+        if not user_content:
+            raise ValueError(f"Required prompt field '{prompt_key}' not found in input")
+
         if is_dyn:
-            system_content = payload.get(sys_prompt_key, "")
+            system_content = payload.get(sys_prompt_key)
+            if not system_content:
+                log.warning(f"Dynamic system prompt field '{sys_prompt_key}' not found, using default")
+                system_content = "You are a helpful assistant"
         else:
             system_content = "You are a helpful assistant"
 
         return {
-            "model": self._openai_model(),  # same helper as before
+            "model": self._openai_model(),
             "messages": [
                 {"role": "system", "content": system_content},
                 {"role": "user", "content": user_content},
@@ -463,3 +595,45 @@ class RequestService:
         return mitrailleuse_pb2.ExecuteTaskResponse(
             status=task.status.value, job_id=job_id or ""
         )
+
+    def ListTasks(self, request, context):
+        """List available tasks for a user and task name."""
+        try:
+            tasks = TaskService.list_available_tasks(request.user_id, request.task_name)
+            return mitrailleuse_pb2.ListTasksResponse(
+                tasks=[
+                    mitrailleuse_pb2.TaskInfo(
+                        user_id=task.user_id,
+                        api_name=task.api_name,
+                        task_name=task.task_name,
+                        status=task.status.value,
+                        path=str(task.path(TASK_ROOT))
+                    )
+                    for task in tasks
+                ]
+            )
+        except Exception as e:
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return mitrailleuse_pb2.ListTasksResponse()
+
+    def GetTaskByPath(self, request, context):
+        """Get task information from a specific path."""
+        try:
+            task = TaskService.get_task_by_path(Path(request.task_path))
+            if not task:
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                context.set_details(f"Task not found at path: {request.task_path}")
+                return mitrailleuse_pb2.TaskInfo()
+            
+            return mitrailleuse_pb2.TaskInfo(
+                user_id=task.user_id,
+                api_name=task.api_name,
+                task_name=task.task_name,
+                status=task.status.value,
+                path=str(task.path(TASK_ROOT))
+            )
+        except Exception as e:
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return mitrailleuse_pb2.TaskInfo()

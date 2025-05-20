@@ -1,11 +1,13 @@
 {
   "task_name": "openai_test_shot_21_04_2025_155231",
+  "user_id": "user1",
 
   "openai": {
     "batch": {
       "is_batch_active": true,
       "batch_check_time": 120,
-      "batch_size": 20
+      "batch_size": 20,
+      "combine_batches": false
     },
     "prompt": "input_text",
     "system_instruction": {
@@ -33,7 +35,8 @@
     "batch": {
       "is_batch_active": true,
       "batch_check_time": 120,
-      "batch_size": 20
+      "batch_size": 20,
+      "combine_batches": false
     },
     "prompt": "input_text",
     "system_instruction": {
@@ -77,6 +80,7 @@
     },
     "multiprocessing_enabled": true,
     "num_processes": 10,
+    "process_cap_percentage": 75,
 
     "db": {
       "postgres": {

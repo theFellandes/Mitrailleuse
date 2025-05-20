@@ -2,11 +2,12 @@ import json
 from copy import deepcopy
 from pathlib import Path
 import shutil
-from typing import Tuple
+from typing import Tuple, List, Optional
 from mitrailleuse.domain.models import Task, TaskStatus
 from mitrailleuse.config.config import Config
 from mitrailleuse.infrastructure.logging.logger import get_logger
 from mitrailleuse.infrastructure.settings import TASK_ROOT, REPO_ROOT, TEMPLATE_CONFIG
+from mitrailleuse.infrastructure.adapters.memory_cache_adapter import MemoryCache
 
 # *****  choose a project-wide tasks root you like *****
 PROJECT_ROOT = Path(__file__).resolve().parents[2]  # repo root
@@ -17,6 +18,35 @@ log = get_logger(__name__)
 
 class TaskService:
     """Handles task life-cycle, folder provisioning, config persistence."""
+
+    def __init__(self):
+        self.memory_cache = MemoryCache()
+
+    @staticmethod
+    def list_available_tasks(user_id: str, task_name: str) -> List[Task]:
+        """List all available tasks for a user and task name."""
+        tasks = []
+        user_tasks_dir = TASK_ROOT / user_id
+        
+        if not user_tasks_dir.exists():
+            return tasks
+        
+        # Get all task directories matching the pattern
+        task_dirs = sorted(user_tasks_dir.glob(f"{task_name}_*"), reverse=True)
+        
+        for task_dir in task_dirs:
+            task = TaskService.status_from_path(task_dir)
+            if task:
+                tasks.append(task)
+        
+        return tasks
+
+    @staticmethod
+    def get_task_by_path(task_path: Path) -> Optional[Task]:
+        """Get task information from a specific path."""
+        if not task_path.exists():
+            return None
+        return TaskService.status_from_path(task_path)
 
     @staticmethod
     def create_task(user_id: str, api_name: str,
@@ -34,9 +64,27 @@ class TaskService:
             shutil.copy(TEMPLATE_CONFIG, base_path / "config" / "config_original.json")
             log.info(f"Copied template config from {TEMPLATE_CONFIG}")
 
-        # Ensure task_name is set correctly and save config
+        # Validate and ensure required fields are present
         if isinstance(cfg, Config):
-            # ── live copy (deep-clone dict ➜ update task_name) ───────────────────
+            # Ensure prompt field is set
+            if not hasattr(cfg, "prompt") or not cfg.prompt:
+                log.warning("No prompt field specified in config, using default 'input_text'")
+                cfg.prompt = "input_text"
+
+            # Ensure system instruction settings are valid
+            if not hasattr(cfg, "system_instruction"):
+                cfg.system_instruction = {"is_dynamic": False, "system_prompt": ""}
+            elif not isinstance(cfg.system_instruction, dict):
+                cfg.system_instruction = {"is_dynamic": False, "system_prompt": ""}
+
+            # Add cache configuration
+            if not hasattr(cfg, "cache"):
+                cfg.cache = {
+                    "memory_cache_enabled": True,
+                    "memory_cache_ttl": 3600  # 1 hour default TTL
+                }
+
+            # Ensure task_name is set correctly and save config
             try:
                 live_cfg = cfg.copy(update={"task_name": task.task_name})
                 config_path = base_path / "config" / "config.json"
