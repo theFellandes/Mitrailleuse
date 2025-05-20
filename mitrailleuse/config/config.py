@@ -32,6 +32,11 @@ class SimilaritySettings(BaseModel):
     max_recent_responses: int = 100
 
 
+class SimilarityCheck(BaseModel):
+    enabled: bool = False
+    settings: SimilaritySettings = Field(default_factory=SimilaritySettings)
+
+
 class SystemInstruction(BaseModel):
     is_dynamic: bool = False
     system_prompt: str = ""
@@ -42,6 +47,7 @@ class BatchConfig(BaseModel):
     batch_size: int = 5
     batch_check_time: int = 120
     combine_batches: bool = False
+    file_batch: bool = False
 
 
 class APISettings(BaseModel):
@@ -93,8 +99,7 @@ class GeneralConfig(BaseModel):
     num_processes: int
     process_cap_percentage: int = 75
     db: DBConfig
-    check_similarity: bool
-    similarity_settings: SimilaritySettings = Field(default_factory=SimilaritySettings)
+    similarity_check: SimilarityCheck = Field(default_factory=SimilarityCheck)
 
 
 class Config(BaseModel):

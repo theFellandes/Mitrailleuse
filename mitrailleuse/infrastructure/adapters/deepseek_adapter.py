@@ -6,13 +6,18 @@ expects.  DeepSeek does **not** expose a batch endpoint (May‑2025), so
 send_batch() raises NotImplementedError for now.
 """
 from __future__ import annotations
-import os, httpx, logging, json, pathlib
+import os
+import httpx
+import logging
+import json
+from pathlib import Path
 from typing import List, Dict, Any
 
+from mitrailleuse.application.ports.api_port import APIPort
 from mitrailleuse.infrastructure.utils.circuit_breaker import circuit
 
 
-class DeepSeekAdapter:
+class DeepSeekAdapter(APIPort):
     BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
     ENDPOINT = "/chat/completions"
     TIMEOUT = 60.0  # seconds
@@ -25,37 +30,73 @@ class DeepSeekAdapter:
             self.api_key = cfg_or_api_key
         else:  # config object / dict
             self.api_key = (
-                               getattr(cfg_or_api_key.deepseek, "api_key", None)
-                               if hasattr(cfg_or_api_key, "deepseek")
-                               else cfg_or_api_key.get("deepseek", {}).get("api_key")
-                           ) or os.getenv("DEEPSEEK_API_KEY", "")
+                getattr(cfg_or_api_key.deepseek, "api_key", None)
+                if hasattr(cfg_or_api_key, "deepseek")
+                else cfg_or_api_key.get("deepseek", {}).get("api_key")
+            ) or os.getenv("DEEPSEEK_API_KEY", "")
+            
         if not self.api_key:
             raise RuntimeError("DeepSeek API key missing (env DEEPSEEK_API_KEY)")
+            
         self._log = logging.getLogger(self.__class__.__name__)
+        
+        # Create async client
+        self._client = httpx.AsyncClient(
+            timeout=self.TIMEOUT,
+            http2=True
+        )
 
-    # ───────────────────────── helpers ──────────────────────────
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+
+    async def close(self) -> None:
+        """Close the async client."""
+        if hasattr(self, '_client'):
+            await self._client.aclose()
+
     def _headers(self) -> Dict[str, str]:
         return {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
 
-    # ───────────────────────── chat completions ─────────────────
     @circuit()
-    def send_single(self, body: Dict[str, Any]) -> Dict[str, Any]:
+    async def ping(self) -> bool:
+        """Ping the DeepSeek API to check connectivity."""
+        try:
+            url = f"{self.BASE_URL}/models"
+            r = await self._client.get(url, headers=self._headers())
+            return r.status_code == 200
+        except Exception as e:
+            self._log.error(f"Ping failed: {str(e)}")
+            return False
+
+    @circuit()
+    async def send_single(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """Send a single chat completion request."""
         url = f"{self.BASE_URL}{self.ENDPOINT}"
-        with httpx.Client(timeout=self.TIMEOUT, http2=True) as client:
-            r = client.post(url, headers=self._headers(), json=body)
+        try:
+            r = await self._client.post(url, headers=self._headers(), json=body)
             r.raise_for_status()
             return r.json()
+        except httpx.HTTPStatusError as e:
+            self._log.error(f"HTTP error: {e.response.status_code} - {e.response.text}")
+            raise
+        except Exception as e:
+            self._log.error(f"Request failed: {str(e)}")
+            raise
 
-    # ───────────────────────── batch (not yet) ──────────────────
-    def send_batch(self, *_):
+    async def send_batch(self, payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """DeepSeek does not support batch operations."""
         raise NotImplementedError("DeepSeek has no public batch endpoint yet.")
 
-    # downstream code queries for these:
-    def get_batch_status(self, *_):  # pragma: no cover
-        raise NotImplementedError
+    async def get_batch_status(self, job_id: str) -> dict:
+        """DeepSeek does not support batch operations."""
+        raise NotImplementedError("DeepSeek has no public batch endpoint yet.")
 
-    def download_batch_results(self, *_):  # pragma: no cover
-        raise NotImplementedError
+    async def download_batch_results(self, job_id: str, output_dir: Path, task_name: str) -> Path:
+        """DeepSeek does not support batch operations."""
+        raise NotImplementedError("DeepSeek has no public batch endpoint yet.")

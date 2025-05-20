@@ -6,13 +6,17 @@ OpenAI or DeepSeek.  DeepL has no batch endpoint, so send_batch()
 raises NotImplementedError (same pattern as DeepSeek).
 """
 from __future__ import annotations
-import os, httpx, logging
+import os
+import httpx
+import logging
 from typing import Dict, Any, List
+from pathlib import Path
 
+from mitrailleuse.application.ports.api_port import APIPort
 from mitrailleuse.infrastructure.utils.circuit_breaker import circuit
 
 
-class DeepLAdapter:
+class DeepLAdapter(APIPort):
     BASE_URL = os.getenv("DEEPL_BASE_URL", "https://api.deepl.com/v2")
     ENDPOINT = "/translate"
     TIMEOUT = 60.0  # seconds
@@ -35,15 +39,30 @@ class DeepLAdapter:
             raise RuntimeError("DeepL API key missing (env DEEPL_API_KEY)")
 
         self._log = logging.getLogger(self.__class__.__name__)
+        
+        # Create async client
+        self._client = httpx.AsyncClient(
+            timeout=self.TIMEOUT,
+            http2=True
+        )
 
-    # ───────────────────────── helpers ──────────────────────────
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+
+    async def close(self) -> None:
+        """Close the async client."""
+        if hasattr(self, '_client'):
+            await self._client.aclose()
+
     def _headers(self) -> Dict[str, str]:
         return {
             "Authorization": f"DeepL-Auth-Key {self.api_key}",
             "Content-Type": "application/json",
         }
 
-    # ───────────────────────── single request ───────────────────
     def build_body(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Map fields from payload → DeepL request body."""
         text_val = payload.get(self.text_key, "")
@@ -54,20 +73,47 @@ class DeepLAdapter:
                 f"(keys: {self.text_key}, {self.lang_key})"
             )
         return {
-            "text": [text_val],  # may send up to 50 items:contentReference[oaicite:1]{index=1}
-            "target_lang": lang_val.upper(),  # must be uppercase code:contentReference[oaicite:2]{index=2}
+            "text": [text_val],  # may send up to 50 items
+            "target_lang": lang_val.upper(),  # must be uppercase code
         }
 
     @circuit()
-    def send_single(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def ping(self) -> bool:
+        """Ping the DeepL API to check connectivity."""
+        try:
+            url = f"{self.BASE_URL}/usage"
+            r = await self._client.get(url, headers=self._headers())
+            return r.status_code == 200
+        except Exception as e:
+            self._log.error(f"Ping failed: {str(e)}")
+            return False
+
+    @circuit()
+    async def send_single(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Send a single translation request."""
         body = self.build_body(payload)
         url = f"{self.BASE_URL}{self.ENDPOINT}"
         self._log.debug("POST %s -> %s", url, body)
-        with httpx.Client(timeout=self.TIMEOUT, http2=True) as client:
-            r = client.post(url, headers=self._headers(), json=body)
+        
+        try:
+            r = await self._client.post(url, headers=self._headers(), json=body)
             r.raise_for_status()
             return r.json()
+        except httpx.HTTPStatusError as e:
+            self._log.error(f"HTTP error: {e.response.status_code} - {e.response.text}")
+            raise
+        except Exception as e:
+            self._log.error(f"Request failed: {str(e)}")
+            raise
 
-    # ───────────────────────── batch stub ───────────────────────
-    def send_batch(self, *_):
+    async def send_batch(self, payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """DeepL does not support batch operations."""
+        raise NotImplementedError("DeepL API does not support batch jobs yet.")
+
+    async def get_batch_status(self, job_id: str) -> dict:
+        """DeepL does not support batch operations."""
+        raise NotImplementedError("DeepL API does not support batch jobs yet.")
+
+    async def download_batch_results(self, job_id: str, output_dir: Path, task_name: str) -> Path:
+        """DeepL does not support batch operations."""
         raise NotImplementedError("DeepL API does not support batch jobs yet.")

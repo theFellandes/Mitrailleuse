@@ -1,225 +1,261 @@
-import json
-import time
-from pathlib import Path
-
+"""
+OpenAIAdapter  ·  May 2025
+=========================
+Implements send_single() and send_batch() so RequestService can call OpenAI
+just like DeepSeek or DeepL.  OpenAI has a batch endpoint, so send_batch()
+is fully implemented.
+"""
+from __future__ import annotations
+import os
 import httpx
-from typing import Iterable, List, Dict, Any
-from mitrailleuse.application.ports.api_port import APIPort
-from mitrailleuse.infrastructure.logging.logger import get_logger
-from mitrailleuse.infrastructure.utils.circuit_breaker import circuit
+import logging
+import json
+from pathlib import Path
+from typing import Dict, Any, List, Union, Optional
+from datetime import datetime
+import asyncio
+from openai import AsyncOpenAI
 
-log = get_logger(__name__)
+from mitrailleuse.application.ports.api_port import APIPort
+from mitrailleuse.infrastructure.utils.circuit_breaker import circuit
 
 
 class OpenAIAdapter(APIPort):
-    BASE = "https://api.openai.com/v1"
-    BATCH_ENDPOINT = f"{BASE}/batches"
+    BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    ENDPOINT = "/chat/completions"
+    BATCH_ENDPOINT = "/batch"
+    TIMEOUT = 60.0  # seconds
 
-    def __init__(self, config):
-        self._cfg = config.openai if hasattr(config, 'openai') else config['openai']
-        self._headers = {
-            "Authorization": f"Bearer {self._cfg.api_key if hasattr(self._cfg, 'api_key') else self._cfg['api_key']}",
-            "Content-Type": "application/json"
+    def __init__(self, config: Dict):
+        self.config = config
+        self.client = AsyncOpenAI(api_key=config["openai"]["api_key"])
+        self.model = config["openai"]["api_information"]["model"]
+        self.settings = config["openai"]["api_information"]["setting"]
+        self._log = logging.getLogger(self.__class__.__name__)
+        
+        # Create async client
+        self._client = httpx.AsyncClient(
+            timeout=self.TIMEOUT,
+            http2=True
+        )
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+
+    async def close(self) -> None:
+        """Close the async client."""
+        if hasattr(self, '_client'):
+            await self._client.aclose()
+
+    def _headers(self) -> Dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.config['openai']['api_key']}",
+            "Content-Type": "application/json",
         }
-        # Configure proxies if enabled
-        self._proxy = None
+
+    def _parse_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
+        """Parse OpenAI response to extract content."""
         try:
-            # Handle both object and dict style config
-            proxies_enabled = getattr(self._cfg.proxies, "proxies_enabled", False) if hasattr(self._cfg,
-                                                                                              'proxies') else self._cfg.get(
-                'proxies', {}).get('proxies_enabled', False)
-
-            if proxies_enabled:
-                if hasattr(self._cfg, 'proxies'):
-                    self._proxy = getattr(self._cfg.proxies, "https", None) or getattr(self._cfg.proxies, "http", None)
-                else:
-                    self._proxy = self._cfg.get('proxies', {}).get('https') or self._cfg.get('proxies', {}).get('http')
-
-                log.info(f"Using proxy: {self._proxy}")
+            if isinstance(response, dict):
+                content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+                return {"content": content}
+            return {"content": str(response)}
         except Exception as e:
-            log.warning(f"Error configuring proxies: {str(e)}")
-
-    @staticmethod
-    def _build_jsonl_file(payloads: list[dict], temp_dir: Path) -> Path:
-        """Create a JSONL file from a list of payload dictionaries.
-
-        For batch processing, each line should be a valid request object
-        that can be sent to the chat completions endpoint.
-        """
-        # Ensure the directory exists
-        temp_dir.mkdir(parents=True, exist_ok=True)
-
-        # Create a unique filename using current timestamp
-        timestamp = int(time.time())
-        jsonl_path = temp_dir / f"batch_inputs_{timestamp}.jsonl"
-
-        # Write each payload as a JSON line
-        with open(jsonl_path, "w", encoding="utf-8") as f:
-            for idx, payload in enumerate(payloads):
-                request_line = {
-                    "custom_id": f"item-{idx}",
-                    "method": "POST",
-                    "url": "/v1/chat/completions",
-                    "body": payload  # includes "model"
-                }
-                f.write(json.dumps(request_line, ensure_ascii=False) + "\n")
-
-        log.info(f"Created batch input file at {jsonl_path} with {len(payloads)} items")
-        return jsonl_path
+            self._log.error(f"Error parsing response: {str(e)}")
+            return {"content": str(response)}
 
     @circuit()
-    def ping(self) -> bool:
-        log.info("Pinging OpenAI API")
+    async def ping(self) -> bool:
+        """Ping the OpenAI API to check connectivity."""
         try:
-            r = httpx.get(
-                f"{self.BASE}/models",
-                headers=self._headers,
-                proxy=self._proxy,
-                timeout=5
-            )
+            url = f"{self.BASE_URL}/models"
+            r = await self._client.get(url, headers=self._headers())
             return r.status_code == 200
         except Exception as e:
-            log.error(f"Ping failed: {str(e)}")
+            self._log.error(f"Ping failed: {str(e)}")
             return False
 
-    @circuit()
-    def send_single(self, payload: dict) -> dict:
-        log.info(f"Sending single request: {payload.get('model', 'unknown')}")
+    async def send_single(self, payload: Dict) -> Dict:
+        """Send a single request to OpenAI."""
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=payload["messages"],
+            temperature=self.settings["temperature"],
+            max_tokens=self.settings["max_tokens"]
+        )
+        return response
+
+    async def send_batch(self, payloads: List[Dict]) -> Dict:
+        """Send a batch of requests to OpenAI."""
         try:
-            r = httpx.post(
-                f"{self.BASE}/chat/completions",
-                headers=self._headers,
-                json=payload,
-                proxy=self._proxy,
-                timeout=30
+            messages = []
+            for payload in payloads:
+                messages.append(payload["messages"][-1])  # Get the last message (user message)
+            
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=self.settings["temperature"],
+                max_tokens=self.settings["max_tokens"]
             )
-            r.raise_for_status()
-            return r.json()
-        except httpx.HTTPStatusError as e:
-            log.error(f"HTTP error: {e.response.status_code} - {e.response.text}")
-            raise
+            
+            # Convert response to dict format
+            if hasattr(response, 'model_dump'):
+                return response.model_dump()
+            elif hasattr(response, 'dict'):
+                return response.dict()
+            elif hasattr(response, 'json'):
+                return response.json()
+            else:
+                # Try to convert to dict if possible
+                try:
+                    return json.loads(str(response))
+                except (json.JSONDecodeError, TypeError):
+                    return {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": str(response)
+                                }
+                            }
+                        ]
+                    }
         except Exception as e:
-            log.error(f"Request failed: {str(e)}")
-            raise
-
-    @circuit()
-    def send_batch(self, payloads: Iterable[dict]) -> Dict[str, Any]:
-        """Send a batch of requests using OpenAI's batch API."""
-        # Convert iterable to list for multiple passes
-        payloads_list = list(payloads)
-        log.info(f"Sending batch request with {len(payloads_list)} items")
-
-        try:
-            # Create a temporary directory for the JSONL file if needed
-            temp_dir = Path("./temp_batch_files")
-            temp_dir.mkdir(exist_ok=True)
-
-            # 1. Create JSONL file
-            jsonl_path = self._build_jsonl_file(payloads_list, temp_dir)
-
-            # 2. Upload file to OpenAI
-            with open(jsonl_path, "rb") as f:
-                files = {"file": (jsonl_path.name, f, "application/jsonl")}
-                upload_response = httpx.post(
-                    f"{self.BASE}/files",
-                    headers={"Authorization": self._headers["Authorization"]},
-                    files=files,
-                    data={"purpose": "batch"}
-                )
-                upload_response.raise_for_status()
-                file_id = upload_response.json()["id"]
-                log.info(f"Uploaded batch file with ID: {file_id}")
-
-            # 3. Create batch job with correct parameters based on error feedback
-            # Get model from the first payload if available
-            model = None
-            if payloads_list and "model" in payloads_list[0]:
-                model = payloads_list[0]["model"]
-
-            # Create the batch request payload with correct parameter names
-            batch_data = {
-                "input_file_id": file_id,  # Use input_file_id as requested by the API
-                "completion_window": "24h",
-                "endpoint": "/v1/chat/completions"
+            self._log.error(f"Error in batch processing: {str(e)}")
+            return {
+                "status": "failed",
+                "error": str(e)
             }
 
-            batch_response = httpx.post(
-                self.BATCH_ENDPOINT,
-                headers=self._headers,
-                json=batch_data,
-                timeout=60
-            )
-            batch_response.raise_for_status()
-            batch_job = batch_response.json()
-
-            log.info(f"Created batch job with ID: {batch_job.get('id')}")
-            return batch_job
-
-        except httpx.HTTPStatusError as e:
-            log.error(f"HTTP error during batch creation: {e.response.status_code} - {e.response.text}")
-            raise
+    async def send_file_batch(self, file_path: Union[str, Path]) -> Dict:
+        """Send a file batch request to OpenAI."""
+        try:
+            # Upload file
+            with open(file_path, 'rb') as f:
+                file = await self.client.files.create(
+                    file=f,
+                    purpose='batch'
+                )
+            
+            # Wait for processing
+            while True:
+                status = await self.client.files.retrieve(file.id)
+                if status.status == 'processed':
+                    break
+                await asyncio.sleep(self.config["openai"]["batch"]["batch_check_time"])
+            
+            # Get results
+            results = await self.client.files.content(file.id)
+            
+            # Handle binary response
+            try:
+                # First try to decode as text
+                content = results.text
+                # Then try to parse as JSON
+                try:
+                    parsed_results = json.loads(content)
+                    return {
+                        "id": file.id,
+                        "status": "completed",
+                        "results": parsed_results
+                    }
+                except json.JSONDecodeError:
+                    # If not JSON, return as text
+                    return {
+                        "id": file.id,
+                        "status": "completed",
+                        "results": content
+                    }
+            except Exception as e:
+                # If text decoding fails, try to handle as binary
+                try:
+                    # Try to decode as UTF-8
+                    content = results.content.decode('utf-8')
+                    try:
+                        parsed_results = json.loads(content)
+                        return {
+                            "id": file.id,
+                            "status": "completed",
+                            "results": parsed_results
+                        }
+                    except json.JSONDecodeError:
+                        return {
+                            "id": file.id,
+                            "status": "completed",
+                            "results": content
+                        }
+                except Exception as decode_error:
+                    self._log.error(f"Error decoding binary response: {str(decode_error)}")
+                    return {
+                        "id": file.id,
+                        "status": "failed",
+                        "error": f"Failed to decode response: {str(decode_error)}"
+                    }
         except Exception as e:
-            log.error(f"Batch request failed: {str(e)}")
-            raise
+            self._log.error(f"Error in file batch processing: {str(e)}")
+            return {
+                "id": getattr(file, 'id', None),
+                "status": "failed",
+                "error": str(e)
+            }
 
-    def get_batch_status(self, job_id: str) -> dict:
+    async def get_batch_status(self, batch_id: str) -> Dict:
         """Get the status of a batch job."""
-        log.info(f"Checking status for batch job: {job_id}")
         try:
-            response = httpx.get(
-                f"{self.BATCH_ENDPOINT}/{job_id}",
-                headers=self._headers,
-                proxy=self._proxy,
-                timeout=15
-            )
-            response.raise_for_status()
-            status = response.json()
-            log.info(f"Batch status: {status.get('status', 'unknown')}")
-            return status
+            status = await self.client.files.retrieve(batch_id)
+            return {
+                "id": batch_id,
+                "status": status.status,
+                "created_at": status.created_at,
+                "completed_at": status.completed_at,
+                "error": status.error if hasattr(status, 'error') else None
+            }
         except Exception as e:
-            log.error(f"Failed to get batch status: {str(e)}")
-            raise
+            self._log.error(f"Error getting batch status: {str(e)}")
+            return {
+                "id": batch_id,
+                "status": "error",
+                "error": str(e)
+            }
 
-    def download_batch_results(self, job_id: str, output_dir: Path, task_name: str) -> Path:
-        """Download the results of a completed batch job."""
-        log.info(f"Downloading results for batch job: {job_id}")
+    async def download_batch_results(self, batch_id: str, output_dir: Path, task_name: str) -> Path:
+        """Download batch results."""
         try:
-            # 1. Get batch status to find the output file ID
-            status = self.get_batch_status(job_id)
-            if status.get("status") != "completed":
-                raise ValueError(f"Batch job {job_id} is not completed. Current status: {status.get('status')}")
-
-            # Extract output file ID - check both locations based on API version
-            output_file_id = None
-            if "output_file_id" in status:
-                output_file_id = status.get("output_file_id")
-            elif "result_files" in status and isinstance(status["result_files"], dict) and "id" in status[
-                "result_files"]:
-                output_file_id = status["result_files"]["id"]
-
-            if not output_file_id:
-                raise ValueError(f"No output file ID found for batch job {job_id}")
-
-            # 2. Get file content
-            response = httpx.get(
-                f"{self.BASE}/files/{output_file_id}/content",
-                headers=self._headers,
-                proxy=self._proxy,
-                timeout=60
-            )
-            response.raise_for_status()
-
-            # 3. Count lines → "<task>_<n>.jsonl"
-            content_bytes = response.content
-            line_count = len(content_bytes.splitlines())
-
-            output_dir.mkdir(parents=True, exist_ok=True)
-            output_path = output_dir / f"{task_name}_{line_count}.jsonl"
-            output_path.write_bytes(content_bytes)
-            log.info(f"Batch results saved to {output_path}")
-
-            return output_path
-
+            results = await self.client.files.content(batch_id)
+            output_file = output_dir / f"{task_name}_batch_results.jsonl"
+            
+            # Handle binary response
+            try:
+                # First try to decode as text
+                content = results.text
+                try:
+                    # Try to parse as JSON
+                    parsed_results = json.loads(content)
+                    with open(output_file, 'w') as f:
+                        json.dump(parsed_results, f, indent=2)
+                except json.JSONDecodeError:
+                    # If not JSON, write as text
+                    with open(output_file, 'w') as f:
+                        f.write(content)
+            except Exception as e:
+                # If text decoding fails, try to handle as binary
+                try:
+                    content = results.content.decode('utf-8')
+                    try:
+                        parsed_results = json.loads(content)
+                        with open(output_file, 'w') as f:
+                            json.dump(parsed_results, f, indent=2)
+                    except json.JSONDecodeError:
+                        with open(output_file, 'w') as f:
+                            f.write(content)
+                except Exception as decode_error:
+                    self._log.error(f"Error decoding binary response: {str(decode_error)}")
+                    raise
+            
+            return output_file
         except Exception as e:
-            log.error(f"Failed to download batch results: {str(e)}")
+            self._log.error(f"Error downloading batch results: {str(e)}")
             raise

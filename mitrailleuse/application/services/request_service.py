@@ -8,6 +8,7 @@ import uuid
 import shutil
 from pathlib import Path
 import multiprocessing
+from typing import Union, List, Dict
 
 from mitrailleuse import mitrailleuse_pb2
 from mitrailleuse.application.services.task_service import TaskService
@@ -136,14 +137,13 @@ class RequestService:
 
     async def _send_single(self, file_path: Path, base_path: Path):
         """Process a single file with backup and format conversion."""
-        # Initialize file flattener
-        file_flattener = FileFlattener(base_path, self.config)
-        
-        # Flatten the input file first
-        flattened_file = file_flattener.flatten_file(file_path)
+        # Backup original file
+        original_dir = base_path / "inputs" / "original"
+        original_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(file_path, original_dir / file_path.name)
         
         # Convert to JSONL for processing
-        jsonl_file = FileConverter.convert_to_jsonl(flattened_file, base_path)
+        jsonl_file = FileConverter.convert_to_jsonl(file_path, base_path)
         
         # Read all lines from the JSONL file
         with open(jsonl_file, 'r') as f:
@@ -162,10 +162,14 @@ class RequestService:
                 log.info(f"Sending request for item in {file_path.name}")
                 response = await self.api.send_single(body_or_payload)
                 
+                # Convert response to dict for JSON serialization
+                if hasattr(response, 'model_dump'):
+                    response = response.model_dump()
+                
                 # Check similarity if enabled
                 if self.similarity_checker and self._check_similarity_enabled():
                     is_similar, similarity = self.similarity_checker.check_similarity(response)
-                    if is_similar:
+                    if is_similar and similarity > 0.0:  # Only apply cooldown if actually similar
                         cooldown_time = self.similarity_checker.get_cooldown_time()
                         log.warning(
                             f"Similar response detected (similarity: {similarity:.2f}). "
@@ -180,6 +184,23 @@ class RequestService:
             
             # Also update the file cache
             await self.cache.set(f"{file_path.name}_{len(results)}", response)
+
+        # Save both raw and parsed responses
+        output_dir = base_path / "outputs"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save raw response
+        raw_output = output_dir / f"{file_path.stem}_response.json"
+        with open(raw_output, 'w') as f:
+            json.dump(results, f, indent=2)
+        
+        # Save parsed response
+        parsed_output = output_dir / f"parsed_{file_path.stem}_response.jsonl"
+        with open(parsed_output, 'w') as f:
+            for response in results:
+                if isinstance(response, dict):
+                    content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    f.write(json.dumps({"content": content}) + '\n')
 
         return file_path, results
 
@@ -390,90 +411,6 @@ class RequestService:
         n_tasks = min(len(files), self._calculate_process_cap(self.config))
         log.info(f"Using {n_tasks} concurrent tasks for processing")
 
-        # ---------------- batch mode
-        if self._is_batch_enabled(self.config):
-            log.info("Using batch mode for request")
-            
-            # Initialize file flattener
-            file_flattener = FileFlattener(base_path, self.config)
-            
-            # Process each file through memory cache
-            payloads = []
-            for f in files:
-                # Check cooldown if similarity checking is enabled
-                if self.similarity_checker and self.similarity_checker.should_cooldown():
-                    cooldown_time = self.similarity_checker.get_cooldown_time()
-                    log.warning(f"Cooldown active. Waiting {cooldown_time} seconds...")
-                    await asyncio.sleep(cooldown_time)
-                
-                # Flatten and convert to JSONL
-                flattened_file = file_flattener.flatten_file(f)
-                jsonl_file = FileConverter.convert_to_jsonl(flattened_file, base_path)
-                user_payload = json.loads(jsonl_file.read_text())
-                
-                if isinstance(self.api, DeepLAdapter):
-                    body = user_payload
-                else:
-                    body = self._build_openai_body(user_payload)
-                
-                # Try to get from memory cache first
-                async def send_request():
-                    response = await self.api.send_single(body)
-                    
-                    # Check similarity if enabled
-                    if self.similarity_checker and self._check_similarity_enabled():
-                        is_similar, similarity = self.similarity_checker.check_similarity(response)
-                        if is_similar:
-                            cooldown_time = self.similarity_checker.get_cooldown_time()
-                            log.warning(
-                                f"Similar response detected (similarity: {similarity:.2f}). "
-                                f"Applying cooldown of {cooldown_time} seconds."
-                            )
-                            await asyncio.sleep(cooldown_time)
-                    
-                    return response
-                
-                response = await self.memory_cache.get_or_set(body, send_request)
-                payloads.append(response)
-
-            try:
-                job_obj = await self.api.send_batch(payloads)
-
-                # 1) persist job‑meta
-                cache_file = base_path / "cache" / "batch_job.json"
-                cache_file.write_text(json.dumps(job_obj, indent=2))
-
-                # Start the tracking task
-                asyncio.create_task(
-                    self._track_batch_job(job_obj, base_path, self.task_name)
-                )
-                log.info(f"Started batch tracking task for job {job_obj['id']}")
-
-                # Save batch results based on combine_batches setting
-                if not self._should_combine_batches(self.config):
-                    # Save each batch result separately
-                    for i, payload in enumerate(payloads):
-                        output_file = outputs_path / f"batch_{i}_response.json"
-                        with open(output_file, 'w') as f:
-                            json.dump(payload, f, indent=2)
-                else:
-                    # Combine all batch results
-                    output_file = outputs_path / "batch_responses.json"
-                    with open(output_file, 'w') as f:
-                        json.dump(payloads, f, indent=2)
-
-                task.status = TaskStatus.SUCCESS
-                log.info(f"Batch job created with ID: {job_obj['id']}")
-                return job_obj["id"]
-
-            except Exception as e:
-                log.error(f"Batch request failed: {str(e)}")
-                task.status = TaskStatus.FAILED
-                return None
-
-        # --------------- single-shot (maybe multiproc)
-        log.info("Using direct request mode")
-        
         try:
             outputs_path.mkdir(parents=True, exist_ok=True)
             
@@ -486,17 +423,18 @@ class RequestService:
             # Wait for all tasks to complete
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
-            for fname, resp in results:
-                if isinstance(resp, Exception):
-                    log.error(f"Error processing {fname.name}: {str(resp)}")
+            for fname, responses in results:
+                if isinstance(responses, Exception):
+                    log.error(f"Error processing {fname.name}: {str(responses)}")
                     task.status = TaskStatus.FAILED
                     return None
                 
-                await self.cache.set(fname.name, resp)
-                out_name = self._result_filename(fname, self.task_name, 1)
-                output_file = outputs_path / out_name
-                output_file.write_text(json.dumps(resp, indent=2))
-                log.info("Saved response for %s → %s", fname.name, out_name)
+                # Save each response separately
+                for i, response in enumerate(responses):
+                    out_name = self._result_filename(fname, self.task_name, i + 1)
+                    output_file = outputs_path / out_name
+                    output_file.write_text(json.dumps(response, indent=2))
+                    log.info(f"Saved response {i + 1} for {fname.name} → {out_name}")
 
             await self.cache.flush_to_disk()
             task.status = TaskStatus.SUCCESS
@@ -554,13 +492,12 @@ class RequestService:
     def _build_openai_body(self, payload: dict) -> dict:
         """
         Build chat-completion body for both OpenAI and DeepSeek using the
-        mapping rules stored in the task's config:
+        mapping rules stored in the task's config.
 
-          config.prompt            → name of user-prompt field  (default: "input_text")
-          config.system_instruction.is_dynamic
-              false  → system prompt = "You are a helpful assistant"
-              true   → payload[config.system_instruction.system_prompt]
-                                                    (default: "instructions")
+        Handles multiple formats:
+        1. Direct prompt field: {"input_text": "..."}
+        2. Nested prompts: {"prompts": [{"input_text": "..."}]}
+        3. Custom field names from config
         """
 
         # ---------------- helpers ----------------
@@ -587,31 +524,52 @@ class RequestService:
                     return node
             return default
 
-        # ---------------- mapping keys ----------------
-        prompt_key = cfg_get("prompt", "input_text")
-        is_dyn = bool(cfg_get("system_instruction.is_dynamic", False))
-        sys_prompt_key = cfg_get("system_instruction.system_prompt", "instructions")
+        def find_prompt_content(data: dict) -> tuple[str, str]:
+            """
+            Find prompt content and system instruction in various formats.
+            Returns (prompt_content, system_content)
+            """
+            # Get config keys
+            prompt_key = cfg_get("prompt", "input_text")
+            is_dyn = bool(cfg_get("system_instruction.is_dynamic", False))
+            sys_prompt_key = cfg_get("system_instruction.system_prompt", "instructions")
 
-        # ---------------- build message list ----------------
-        user_content = payload.get(prompt_key)
-        if not user_content:
-            raise ValueError(f"Required prompt field '{prompt_key}' not found in input")
+            # Try different formats
+            if "prompts" in data and isinstance(data["prompts"], list):
+                # Handle nested prompts format
+                if not data["prompts"]:
+                    raise ValueError("Empty prompts list")
+                prompt_data = data["prompts"][0]  # Take first prompt
+                user_content = prompt_data.get(prompt_key)
+                system_content = prompt_data.get(sys_prompt_key) if is_dyn else "You are a helpful assistant"
+            else:
+                # Handle direct format
+                user_content = data.get(prompt_key)
+                system_content = data.get(sys_prompt_key) if is_dyn else "You are a helpful assistant"
 
-        if is_dyn:
-            system_content = payload.get(sys_prompt_key)
-            if not system_content:
+            if not user_content:
+                raise ValueError(f"Required prompt field '{prompt_key}' not found in input")
+
+            if is_dyn and not system_content:
                 log.warning(f"Dynamic system prompt field '{sys_prompt_key}' not found, using default")
                 system_content = "You are a helpful assistant"
-        else:
-            system_content = "You are a helpful assistant"
 
-        return {
-            "model": self._openai_model(),
-            "messages": [
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": user_content},
-            ],
-        }
+            return user_content, system_content
+
+        try:
+            # Find prompt content
+            user_content, system_content = find_prompt_content(payload)
+
+            return {
+                "model": self._openai_model(),
+                "messages": [
+                    {"role": "system", "content": system_content},
+                    {"role": "user", "content": user_content},
+                ],
+            }
+        except Exception as e:
+            log.error(f"Error building OpenAI body: {str(e)}")
+            raise
 
     @staticmethod
     def _get_batch_check_time(cfg):
@@ -643,10 +601,10 @@ class RequestService:
     def _check_similarity_enabled(cfg) -> bool:
         """Check if similarity checking is enabled in config."""
         try:
-            return bool(cfg.general.check_similarity)
+            return bool(cfg.general.similarity_check.enabled)
         except AttributeError:
             try:
-                return bool(cfg["general"]["check_similarity"])
+                return bool(cfg["general"]["similarity_check"]["enabled"])
             except (KeyError, TypeError):
                 return False
 
@@ -715,3 +673,169 @@ class RequestService:
         if hasattr(self.similarity_checker, 'close'):
             self.similarity_checker.close()
         # Don't try to close the logger as it doesn't have a close method
+
+    def _should_use_file_batch(self, cfg) -> bool:
+        """Check if file batch mode should be used."""
+        try:
+            # Try object-style access
+            return bool(cfg.openai.batch.file_batch)
+        except (AttributeError, TypeError):
+            # Try dict-style access
+            try:
+                return bool(cfg["openai"]["batch"]["file_batch"])
+            except (KeyError, TypeError):
+                return False
+
+    async def _process_batch_file(self, input_file: Union[str, Path], service: str, base_path: Union[str, Path], config: Dict) -> List[Dict]:
+        """Process a batch file and return the results."""
+        try:
+            # Convert string paths back to Path objects
+            input_file = Path(input_file)
+            base_path = Path(base_path)
+            
+            # Initialize components for this process
+            cache_manager = CacheManager(base_path, config)
+            
+            # Backup original file
+            original_dir = base_path / "inputs" / "original"
+            original_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(input_file, original_dir / input_file.name)
+            
+            # Convert to JSONL and process
+            jsonl_file = FileConverter.convert_to_jsonl(input_file, base_path)
+            batch_size = config["openai"]["batch"]["batch_size"] if service == "openai" else config["deepl"].get("batch_size", 50)
+            batch_files = self._split_into_batches(jsonl_file, batch_size)
+            
+            all_results = []
+            for batch_file in batch_files:
+                try:
+                    with open(batch_file, 'r') as f:
+                        batch_data = [json.loads(line) for line in f if line.strip()]
+                    
+                    # Send batch request
+                    if service == "openai":
+                        if self._should_use_file_batch(config):
+                            # Use file batch API
+                            batch_response = await self.api.send_file_batch(batch_file)
+                            
+                            # Check if batch was successful
+                            if batch_response.get("status") == "failed":
+                                raise Exception(batch_response.get("error", "Unknown error in batch processing"))
+                            
+                            # Get batch results
+                            batch_results = batch_response.get("results", {})
+                            
+                            # Handle different result types
+                            if isinstance(batch_results, str):
+                                try:
+                                    # Try to parse as JSON
+                                    batch_results = json.loads(batch_results)
+                                except json.JSONDecodeError:
+                                    # If not JSON, wrap in expected format
+                                    batch_results = {
+                                        "choices": [
+                                            {
+                                                "message": {
+                                                    "content": batch_results
+                                                }
+                                            }
+                                        ]
+                                    }
+                            elif not isinstance(batch_results, dict):
+                                # Handle non-dict, non-string results
+                                batch_results = {
+                                    "choices": [
+                                        {
+                                            "message": {
+                                                "content": str(batch_results)
+                                            }
+                                        }
+                                    ]
+                                }
+                        else:
+                            # Use normal API with batching
+                            batch_response = await self.api.send_batch(batch_data)
+                            
+                            # Handle different response types
+                            if isinstance(batch_response, dict):
+                                batch_results = batch_response
+                            elif hasattr(batch_response, 'model_dump'):
+                                batch_results = batch_response.model_dump()
+                            elif hasattr(batch_response, 'dict'):
+                                batch_results = batch_response.dict()
+                            elif hasattr(batch_response, 'json'):
+                                batch_results = batch_response.json()
+                            else:
+                                # Try to convert to dict if possible
+                                try:
+                                    batch_results = json.loads(str(batch_response))
+                                except (json.JSONDecodeError, TypeError):
+                                    batch_results = {
+                                        "choices": [
+                                            {
+                                                "message": {
+                                                    "content": str(batch_response)
+                                                }
+                                            }
+                                        ]
+                                    }
+                    
+                    # Save batch results
+                    output_dir = base_path / "outputs"
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    # Save raw response
+                    raw_output = output_dir / f"{batch_file.stem}_batch_response.json"
+                    with open(raw_output, 'w') as f:
+                        json.dump(batch_results, f, indent=2)
+                    
+                    # Save parsed response
+                    parsed_output = output_dir / f"parsed_{batch_file.stem}_batch_response.jsonl"
+                    with open(parsed_output, 'w') as f:
+                        if service == "openai":
+                            if isinstance(batch_results, dict):
+                                choices = batch_results.get("choices", [])
+                                for choice in choices:
+                                    content = choice.get("message", {}).get("content", "")
+                                    f.write(json.dumps({"content": content}) + '\n')
+                            else:
+                                # Handle case where results are not in expected format
+                                f.write(json.dumps({"content": str(batch_results)}) + '\n')
+                        elif service == "deepl":
+                            for response in batch_results.get("responses", []):
+                                content = response.get("translated_text", "")
+                                f.write(json.dumps({"content": content}) + '\n')
+                    
+                    # Add batch results to all results
+                    if service == "openai":
+                        if isinstance(batch_results, dict):
+                            all_results.extend(batch_results.get("choices", []))
+                        else:
+                            all_results.append({"message": {"content": str(batch_results)}})
+                    else:
+                        all_results.extend(batch_results.get("responses", []))
+                    
+                except Exception as e:
+                    log.error(f"Error processing batch {batch_file} with {service}: {str(e)}")
+                    raise
+            
+            # Combine results if configured
+            if self._should_combine_batches(config):
+                combined_output = base_path / "outputs" / f"{input_file.stem}_combined_response.jsonl"
+                with open(combined_output, 'w') as f:
+                    for response in all_results:
+                        if isinstance(response, dict):
+                            if service == "openai":
+                                content = response.get("message", {}).get("content", "")
+                            else:
+                                content = response.get("translated_text", "")
+                            f.write(json.dumps({"content": content}) + '\n')
+            
+            return all_results
+            
+        except Exception as e:
+            log.error(f"Error processing batch {input_file.name}: {str(e)}")
+            return [{"error": str(e)}]
+        finally:
+            # Clean up
+            cache_manager.close()

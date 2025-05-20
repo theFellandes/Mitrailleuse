@@ -18,6 +18,11 @@ from mitrailleuse.infrastructure.utils.cache_manager import CacheManager
 from mitrailleuse.infrastructure.utils.file_flattener import FileFlattener
 from mitrailleuse.infrastructure.utils.logger import get_logger
 from mitrailleuse.infrastructure.utils.similarity_checker import SimilarityChecker
+from mitrailleuse.infrastructure.utils.prompt_utils import (
+    build_openai_body,
+    build_deepl_body,
+    find_prompt_content
+)
 
 # Configure logging
 logging.basicConfig(
@@ -189,41 +194,9 @@ class SimpleClient:
     def _build_request_body(self, input_data: Dict, service: str = "openai") -> Dict:
         """Build the request body for the specified API service."""
         if service == "openai":
-            prompt_key = self.config["openai"]["prompt"]
-            is_dynamic = self.config["openai"]["system_instruction"]["is_dynamic"]
-            sys_prompt_key = self.config["openai"]["system_instruction"]["system_prompt"]
-
-            user_content = input_data.get(prompt_key)
-            if not user_content:
-                raise ValueError(f"Required prompt field '{prompt_key}' not found in input")
-
-            if is_dynamic:
-                system_content = input_data.get(sys_prompt_key, "You are a helpful assistant")
-            else:
-                system_content = "You are a helpful assistant"
-
-            return {
-                "model": self.config["openai"]["api_information"]["model"],
-                "messages": [
-                    {"role": "system", "content": system_content},
-                    {"role": "user", "content": user_content}
-                ],
-                "temperature": self.config["openai"]["api_information"]["setting"]["temperature"],
-                "max_tokens": self.config["openai"]["api_information"]["setting"]["max_tokens"]
-            }
+            return build_openai_body(input_data, self.config)
         elif service == "deepl":
-            text = input_data.get("text")
-            if not text:
-                raise ValueError("Required 'text' field not found in input")
-            
-            target_lang = input_data.get("target_lang", self.config["deepl"].get("default_target_lang", "EN-US"))
-            source_lang = input_data.get("source_lang", self.config["deepl"].get("default_source_lang"))
-            
-            return {
-                "text": text,
-                "target_lang": target_lang,
-                "source_lang": source_lang
-            }
+            return build_deepl_body(input_data, self.config)
         else:
             raise ValueError(f"Unsupported service: {service}")
 
@@ -320,6 +293,20 @@ class SimpleClient:
         except (KeyError, TypeError):
             return True  # Default to True for safety
 
+    def _should_combine_batches(self, config: Dict) -> bool:
+        """Check if batches should be combined based on config."""
+        try:
+            return bool(config["openai"]["batch"]["combine_batches"])
+        except (KeyError, TypeError):
+            return False
+
+    def _should_use_file_batch(self, config: Dict) -> bool:
+        """Check if file batch mode should be used."""
+        try:
+            return bool(config["openai"]["batch"]["file_batch"])
+        except (KeyError, TypeError):
+            return False
+
     async def _process_single_file(self, input_file: Union[str, Path], service: str, base_path: Union[str, Path], config: Dict) -> Dict:
         """Process a single file and return the result."""
         try:
@@ -329,19 +316,14 @@ class SimpleClient:
             
             # Initialize components for this process
             cache_manager = CacheManager(base_path, config)
-            file_flattener = FileFlattener(base_path, config)
             
-            # Initialize API client for this process
-            if service == "openai":
-                api_client = AsyncOpenAI(api_key=config["openai"]["api_key"])
-            elif service == "deepl":
-                api_client = deepl.Translator(config["deepl"]["api_key"])
-            
-            # Flatten the input file first
-            flattened_file = file_flattener.flatten_file(input_file)
+            # Backup original file
+            original_dir = base_path / "inputs" / "original"
+            original_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(input_file, original_dir / input_file.name)
             
             # Convert to JSONL for processing
-            jsonl_file = FileConverter.convert_to_jsonl(flattened_file, base_path)
+            jsonl_file = FileConverter.convert_to_jsonl(input_file, base_path)
             
             with open(jsonl_file, 'r') as f:
                 input_data = json.loads(f.readline().strip())
@@ -366,14 +348,15 @@ class SimpleClient:
             request_body = self._build_request_body(input_data, service)
             try:
                 if service == "openai":
-                    response = await api_client.chat.completions.create(**request_body)
+                    response = await self.openai_client.chat.completions.create(**request_body)
+                    # Convert response to dict for JSON serialization
                     result = {
                         "input": input_data,
                         "response": response.model_dump(),
                         "timestamp": datetime.now().isoformat()
                     }
                 elif service == "deepl":
-                    translation = api_client.translate_text(
+                    translation = self.deepl_client.translate_text(
                         request_body["text"],
                         target_lang=request_body["target_lang"],
                         source_lang=request_body["source_lang"]
@@ -401,10 +384,24 @@ class SimpleClient:
                 # Save to cache
                 cache_manager.set(input_data, result, service)
                 
-                # Save response
-                output_file = base_path / "outputs" / f"{input_file.stem}_{service}_response.json"
+                # Save both raw and parsed responses
+                output_dir = base_path / "outputs"
+                output_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Save raw response
+                output_file = output_dir / f"{input_file.stem}_{service}_response.json"
                 with open(output_file, 'w') as f:
                     json.dump(result, f, indent=2)
+                
+                # Save parsed response
+                parsed_output = output_dir / f"parsed_{input_file.stem}_{service}_response.jsonl"
+                with open(parsed_output, 'w') as f:
+                    if service == "openai":
+                        content = result["response"].get("choices", [{}])[0].get("message", {}).get("content", "")
+                        f.write(json.dumps({"content": content}) + '\n')
+                    elif service == "deepl":
+                        content = result["response"].get("translated_text", "")
+                        f.write(json.dumps({"content": content}) + '\n')
                 
                 return result
             except Exception as e:
@@ -428,100 +425,127 @@ class SimpleClient:
             
             # Initialize components for this process
             cache_manager = CacheManager(base_path, config)
-            file_flattener = FileFlattener(base_path, config)
             
-            # Initialize API client for this process
-            if service == "openai":
-                api_client = AsyncOpenAI(api_key=config["openai"]["api_key"])
-            elif service == "deepl":
-                api_client = deepl.Translator(config["deepl"]["api_key"])
-            
-            # Flatten the input file first
-            flattened_file = file_flattener.flatten_file(input_file)
+            # Backup original file
+            original_dir = base_path / "inputs" / "original"
+            original_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(input_file, original_dir / input_file.name)
             
             # Convert to JSONL and process
-            jsonl_file = FileConverter.convert_to_jsonl(flattened_file, base_path)
+            jsonl_file = FileConverter.convert_to_jsonl(input_file, base_path)
             batch_size = config["openai"]["batch"]["batch_size"] if service == "openai" else config["deepl"].get("batch_size", 50)
             batch_files = self._split_into_batches(jsonl_file, batch_size)
             
-            results = []
+            all_results = []
             for batch_file in batch_files:
                 try:
                     with open(batch_file, 'r') as f:
                         batch_data = [json.loads(line) for line in f if line.strip()]
                     
-                    batch_results = []
-                    for item in batch_data:
-                        # Check cache first
-                        cached_response = cache_manager.get(item, service)
-                        if cached_response:
-                            batch_results.append(cached_response)
-                            continue
-
-                        # Initialize similarity checker only if needed
-                        similarity_checker = None
-                        if self._check_similarity_enabled():
-                            similarity_checker = SimilarityChecker(base_path, config)
-                            # Check cooldown if similarity checking is enabled
-                            if similarity_checker.should_cooldown():
-                                cooldown_time = similarity_checker.get_cooldown_time()
-                                logger.warning(f"Cooldown active. Waiting {cooldown_time} seconds...")
-                                await asyncio.sleep(cooldown_time)
-
-                        # Build and send request
-                        request_body = self._build_request_body(item, service)
-                        if service == "openai":
-                            response = await api_client.chat.completions.create(**request_body)
-                            result = {
-                                "input": item,
-                                "response": response.model_dump(),
-                                "timestamp": datetime.now().isoformat()
-                            }
-                        elif service == "deepl":
-                            translation = api_client.translate_text(
-                                request_body["text"],
-                                target_lang=request_body["target_lang"],
-                                source_lang=request_body["source_lang"]
+                    # Send batch request
+                    if service == "openai":
+                        if self._should_use_file_batch(config):
+                            # Use file batch API
+                            batch_results = await self.openai_client.files.create(
+                                file=open(batch_file, 'rb'),
+                                purpose='batch'
                             )
-                            result = {
-                                "input": item,
-                                "response": {
-                                    "translated_text": translation.text,
-                                    "detected_source_lang": translation.detected_source_lang
-                                },
-                                "timestamp": datetime.now().isoformat()
-                            }
-                        
-                        # Check similarity if enabled
-                        if similarity_checker:
-                            is_similar, similarity = similarity_checker.check_similarity(result["response"])
-                            if is_similar:
-                                cooldown_time = similarity_checker.get_cooldown_time()
-                                logger.warning(
-                                    f"Similar response detected (similarity: {similarity:.2f}). "
-                                    f"Applying cooldown of {cooldown_time} seconds."
+                            # Wait for batch processing
+                            while True:
+                                status = await self.openai_client.files.retrieve(batch_results.id)
+                                if status.status == 'processed':
+                                    break
+                                await asyncio.sleep(config["openai"]["batch"]["batch_check_time"])
+                            
+                            # Get batch results
+                            batch_results = await self.openai_client.files.content(batch_results.id)
+                            batch_results = batch_results.model_dump()
+                        else:
+                            # Use normal API with batching
+                            # Prepare messages for batch
+                            messages = []
+                            for item in batch_data:
+                                prompt_key = config["openai"]["prompt"]
+                                is_dynamic = config["openai"]["system_instruction"]["is_dynamic"]
+                                sys_prompt_key = config["openai"]["system_instruction"]["system_prompt"]
+                                
+                                user_content, system_content = find_prompt_content(
+                                    item, prompt_key, sys_prompt_key, is_dynamic
                                 )
-                                await asyncio.sleep(cooldown_time)
-                        
-                        # Save to cache
-                        cache_manager.set(item, result, service)
-                        batch_results.append(result)
-                        
-                        # Clean up similarity checker after each item
-                        if similarity_checker:
-                            similarity_checker.close()
+                                messages.append({
+                                    "role": "user",
+                                    "content": user_content
+                                })
+                            
+                            # Send batch request
+                            batch_results = await self.openai_client.chat.completions.create(
+                                model=config["openai"]["api_information"]["model"],
+                                messages=messages,
+                                temperature=config["openai"]["api_information"]["setting"]["temperature"],
+                                max_tokens=config["openai"]["api_information"]["setting"]["max_tokens"]
+                            )
+                            # Convert response to dict for JSON serialization
+                            batch_results = batch_results.model_dump()
+                    elif service == "deepl":
+                        batch_results = await self.deepl_client.translate_text(
+                            [item.get("text", "") for item in batch_data],
+                            target_lang=config["deepl"]["target_lang"]
+                        )
+                        batch_results = {
+                            "responses": [
+                                {
+                                    "translated_text": t.text,
+                                    "detected_source_lang": t.detected_source_lang
+                                }
+                                for t in batch_results
+                            ]
+                        }
                     
                     # Save batch results
-                    output_file = base_path / "outputs" / f"{batch_file.stem}_{service}_responses.json"
-                    with open(output_file, 'w') as f:
+                    output_dir = base_path / "outputs"
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    # Save raw response
+                    raw_output = output_dir / f"{batch_file.stem}_batch_response.json"
+                    with open(raw_output, 'w') as f:
                         json.dump(batch_results, f, indent=2)
                     
-                    results.extend(batch_results)
+                    # Save parsed response
+                    parsed_output = output_dir / f"parsed_{batch_file.stem}_batch_response.jsonl"
+                    with open(parsed_output, 'w') as f:
+                        if service == "openai":
+                            for choice in batch_results.get("choices", []):
+                                content = choice.get("message", {}).get("content", "")
+                                f.write(json.dumps({"content": content}) + '\n')
+                        elif service == "deepl":
+                            for response in batch_results.get("responses", []):
+                                content = response.get("translated_text", "")
+                                f.write(json.dumps({"content": content}) + '\n')
+                    
+                    # Add batch results to all results
+                    if service == "openai":
+                        all_results.extend(batch_results.get("choices", []))
+                    else:
+                        all_results.extend(batch_results.get("responses", []))
                     
                 except Exception as e:
                     logger.error(f"Error processing batch {batch_file} with {service}: {str(e)}")
                     raise
-            return results
+            
+            # Combine results if configured
+            if self._should_combine_batches(config):
+                combined_output = base_path / "outputs" / f"{input_file.stem}_combined_response.jsonl"
+                with open(combined_output, 'w') as f:
+                    for response in all_results:
+                        if isinstance(response, dict):
+                            if service == "openai":
+                                content = response.get("message", {}).get("content", "")
+                            else:
+                                content = response.get("translated_text", "")
+                            f.write(json.dumps({"content": content}) + '\n')
+            
+            return all_results
+            
         except Exception as e:
             logger.error(f"Error processing batch {input_file.name}: {str(e)}")
             return [{"error": str(e)}]
