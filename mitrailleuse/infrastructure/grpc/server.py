@@ -4,6 +4,9 @@ from concurrent import futures
 from pathlib import Path
 from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 from grpc_reflection.v1alpha import reflection
+import asyncio
+import logging
+from datetime import datetime
 
 from mitrailleuse import mitrailleuse_pb2, mitrailleuse_pb2_grpc
 from mitrailleuse.application.services.task_service import TaskService
@@ -14,8 +17,23 @@ from mitrailleuse.infrastructure.logging.logger import get_logger
 from mitrailleuse.infrastructure.settings import TASK_ROOT
 from mitrailleuse.config.config import Config
 
-ROOT = Path.cwd() / "tasks"
-log = get_logger(__name__)
+ROOT = TASK_ROOT
+
+# Set up server logging
+server_log_dir = Path(__file__).parent.parent.parent.parent / "logs"
+server_log_dir.mkdir(parents=True, exist_ok=True)
+server_log_file = server_log_dir / f"server_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
+# Configure server logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(server_log_file),
+        logging.StreamHandler()
+    ]
+)
+log = logging.getLogger(__name__)
 
 
 class MitrailleuseGRPC(mitrailleuse_pb2_grpc.MitrailleuseServiceServicer):
@@ -48,19 +66,50 @@ class MitrailleuseGRPC(mitrailleuse_pb2_grpc.MitrailleuseServiceServicer):
         return mitrailleuse_pb2.CreateTaskResponse(task_folder="")
 
     def ExecuteTask(self, request, context):
-        base_path = Path(request.task_folder)
-
         try:
-            # Verify the task folder exists
-            if not base_path.exists():
-                err_msg = f"Task folder {base_path} does not exist"
+            # Get all tasks for the user
+            user_root = ROOT / request.user_id
+            if not user_root.exists():
+                err_msg = f"No tasks found for user {request.user_id}"
+                log.error(err_msg)
+                context.set_details(err_msg)
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                return mitrailleuse_pb2.ExecuteTaskResponse(status="failed", job_id="")
+
+            # Collect all task directories
+            task_dirs = sorted([d for d in user_root.iterdir() if d.is_dir()], key=lambda x: x.name)
+            
+            # If task_folder is a number, treat it as an index
+            if request.task_folder and request.task_folder.isdigit():
+                try:
+                    task_idx = int(request.task_folder) - 1  # Convert to 0-based index
+                    if 0 <= task_idx < len(task_dirs):
+                        task_path = task_dirs[task_idx]
+                        log.info(f"Selected task {task_idx + 1}: {task_path}")
+                    else:
+                        err_msg = f"Invalid task number: {request.task_folder}. Available tasks: 1-{len(task_dirs)}"
+                        log.error(err_msg)
+                        context.set_details(err_msg)
+                        context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                        return mitrailleuse_pb2.ExecuteTaskResponse(status="failed", job_id="")
+                except ValueError:
+                    err_msg = f"Invalid task number format: {request.task_folder}"
+                    log.error(err_msg)
+                    context.set_details(err_msg)
+                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                    return mitrailleuse_pb2.ExecuteTaskResponse(status="failed", job_id="")
+            else:
+                task_path = Path(request.task_folder)
+
+            if not task_path.exists():
+                err_msg = f"Task folder {task_path} does not exist"
                 log.error(err_msg)
                 context.set_details(err_msg)
                 context.set_code(grpc.StatusCode.NOT_FOUND)
                 return mitrailleuse_pb2.ExecuteTaskResponse(status="failed", job_id="")
 
             # Load configuration
-            config_path = base_path / "config" / "config.json"
+            config_path = task_path / "config" / "config.json"
             if not config_path.exists():
                 err_msg = f"Config file not found at {config_path}"
                 log.error(err_msg)
@@ -68,17 +117,63 @@ class MitrailleuseGRPC(mitrailleuse_pb2_grpc.MitrailleuseServiceServicer):
                 context.set_code(grpc.StatusCode.NOT_FOUND)
                 return mitrailleuse_pb2.ExecuteTaskResponse(status="failed", job_id="")
 
-            cfg = Config.read(config_path)
-            cache = FileCache(base_path / "cache")
-            task = TaskService.status_from_path(base_path)
+            # Read and validate config
+            try:
+                cfg = Config.read(config_path)
+            except Exception as e:
+                err_msg = f"Failed to load config: {str(e)}"
+                log.error(err_msg)
+                context.set_details(err_msg)
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                return mitrailleuse_pb2.ExecuteTaskResponse(status="failed", job_id="")
 
-            # 2️⃣  choose adapter
-            provider = (task.api_name or "openai").lower()
-            adapter = ADAPTERS.get(provider, OpenAIAdapter)
-            api = adapter(cfg)
+            # Get task status
+            try:
+                task = TaskService.status_from_path(task_path)
+            except Exception as e:
+                err_msg = f"Failed to get task status: {str(e)}"
+                log.error(err_msg)
+                context.set_details(err_msg)
+                context.set_code(grpc.StatusCode.INTERNAL)
+                return mitrailleuse_pb2.ExecuteTaskResponse(status="failed", job_id="")
 
-            # 3️⃣  fire the RequestService
-            job_id = RequestService(api, cache, cfg).execute(task, base_path)
+            # Initialize cache
+            try:
+                cache = FileCache(task_path / "cache")
+            except Exception as e:
+                err_msg = f"Failed to initialize cache: {str(e)}"
+                log.error(err_msg)
+                context.set_details(err_msg)
+                context.set_code(grpc.StatusCode.INTERNAL)
+                return mitrailleuse_pb2.ExecuteTaskResponse(status="failed", job_id="")
+
+            # Choose adapter
+            try:
+                provider = (task.api_name or "openai").lower()
+                adapter = ADAPTERS.get(provider, OpenAIAdapter)
+                # Convert Config to dictionary before passing to adapter
+                config_dict = cfg.model_dump()
+                api = adapter(config_dict)
+            except Exception as e:
+                err_msg = f"Failed to initialize API adapter: {str(e)}"
+                log.error(err_msg)
+                context.set_details(err_msg)
+                context.set_code(grpc.StatusCode.INTERNAL)
+                return mitrailleuse_pb2.ExecuteTaskResponse(status="failed", job_id="")
+
+            # Fire the RequestService
+            try:
+                # Create an event loop and run the async execute method
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                job_id = loop.run_until_complete(RequestService(api, cache, cfg).execute(task, task_path))
+                loop.close()
+            except Exception as e:
+                err_msg = f"Failed to execute task: {str(e)}"
+                log.error(err_msg)
+                context.set_details(err_msg)
+                context.set_code(grpc.StatusCode.INTERNAL)
+                return mitrailleuse_pb2.ExecuteTaskResponse(status="failed", job_id="")
 
             return mitrailleuse_pb2.ExecuteTaskResponse(
                 status=task.status.value,
@@ -106,6 +201,66 @@ class MitrailleuseGRPC(mitrailleuse_pb2_grpc.MitrailleuseServiceServicer):
             context.set_details(str(exc))
             context.set_code(grpc.StatusCode.INTERNAL)
             return mitrailleuse_pb2.GetTaskStatusResponse(status="unknown")
+
+    def ListTasks(self, request, context):
+        try:
+            tasks = []
+            user_root = ROOT / request.user_id
+            if not user_root.exists():
+                log.info(f"No tasks directory found for user {request.user_id}")
+                return mitrailleuse_pb2.ListTasksResponse(tasks=[])
+
+            # Get all task directories and sort them
+            task_dirs = sorted([d for d in user_root.iterdir() if d.is_dir()], key=lambda x: x.name)
+            if not task_dirs:
+                log.info(f"No tasks found in directory {user_root}")
+                return mitrailleuse_pb2.ListTasksResponse(tasks=[])
+
+            log.info(f"Found {len(task_dirs)} tasks for user {request.user_id}")
+            
+            # Create task info for each directory
+            for task_dir in task_dirs:
+                try:
+                    task = TaskService.status_from_path(task_dir)
+                    tasks.append(mitrailleuse_pb2.TaskInfo(
+                        user_id=request.user_id,
+                        api_name=task.api_name,
+                        task_name=task.task_name,
+                        status=task.status.value,
+                        path=str(task_dir)
+                    ))
+                except Exception as e:
+                    log.error(f"Error processing task {task_dir}: {str(e)}")
+                    continue
+
+            return mitrailleuse_pb2.ListTasksResponse(tasks=tasks)
+        except Exception as exc:
+            log.error(f"List tasks failed: {str(exc)}")
+            context.set_details(str(exc))
+            context.set_code(grpc.StatusCode.INTERNAL)
+            return mitrailleuse_pb2.ListTasksResponse(tasks=[])
+
+    def GetTaskByPath(self, request, context):
+        try:
+            task_path = Path(request.task_path)
+            if not task_path.exists():
+                context.set_details(f"Task folder {task_path} does not exist")
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                return mitrailleuse_pb2.TaskInfo()
+
+            task = TaskService.status_from_path(task_path)
+            return mitrailleuse_pb2.TaskInfo(
+                user_id=task.user_id,
+                api_name=task.api_name,
+                task_name=task.task_name,
+                status=task.status.value,
+                path=str(task_path)
+            )
+        except Exception as exc:
+            log.error(f"Get task by path failed: {str(exc)}")
+            context.set_details(str(exc))
+            context.set_code(grpc.StatusCode.INTERNAL)
+            return mitrailleuse_pb2.TaskInfo()
 
 
 def serve():

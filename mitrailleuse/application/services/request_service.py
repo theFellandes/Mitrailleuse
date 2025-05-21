@@ -9,6 +9,8 @@ import shutil
 from pathlib import Path
 import multiprocessing
 from typing import Union, List, Dict
+import logging
+from datetime import datetime
 
 from mitrailleuse import mitrailleuse_pb2
 from mitrailleuse.application.services.task_service import TaskService
@@ -26,8 +28,7 @@ from mitrailleuse.infrastructure.utils.mp_pool import pick_num_processes
 from mitrailleuse.infrastructure.utils.file_converter import FileConverter
 from mitrailleuse.infrastructure.utils.file_flattener import FileFlattener
 from mitrailleuse.infrastructure.utils.similarity_checker import SimilarityChecker
-
-log = get_logger(__name__)
+from mitrailleuse.scripts.format_response import ResponseFormatter
 
 ADAPTERS = {
     "openai":  OpenAIAdapter,
@@ -59,6 +60,42 @@ class RequestService:
         if not self.task_name:
             workdir = Path(getattr(config, "workdir", ".")).resolve()
             self.task_name = workdir.name.split("_", 1)[0] or "task"
+
+        # Initialize task-specific logger
+        self.log = self._setup_task_logger()
+
+    def _setup_task_logger(self):
+        """Set up task-specific logging."""
+        # Get task directory from config
+        task_dir = Path(getattr(self.config, "workdir", ".")).resolve()
+        log_dir = task_dir / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create a new log file for this task
+        log_file = log_dir / f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        
+        # Configure task-specific logger
+        logger = logging.getLogger(f"task_{self.task_name}")
+        logger.setLevel(logging.INFO)
+        
+        # Create file handler
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logging.INFO)
+        
+        # Create console handler
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        
+        # Create formatter
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+        console_handler.setFormatter(formatter)
+        
+        # Add handlers to logger
+        logger.addHandler(file_handler)
+        logger.addHandler(console_handler)
+        
+        return logger
 
     # ---------------------------------------------------------- helpers
 
@@ -93,7 +130,7 @@ class RequestService:
         timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_file = backup_dir / f"{input_file.stem}_{timestamp}{input_file.suffix}"
         shutil.copy2(input_file, backup_file)
-        log.info(f"Backed up input file to: {backup_file}")
+        self.log.info(f"Backed up input file to: {backup_file}")
 
     def _convert_to_jsonl(self, input_file: Path, base_path: Path) -> Path:
         """Convert JSON file to JSONL format if needed and backup original."""
@@ -114,7 +151,7 @@ class RequestService:
             for item in data:
                 f.write(json.dumps(item) + '\n')
         
-        log.info(f"Converted {input_file} to JSONL format")
+        self.log.info(f"Converted {input_file} to JSONL format")
         return output_file
 
     def _convert_to_json(self, input_file: Path, base_path: Path) -> Path:
@@ -132,77 +169,164 @@ class RequestService:
         with open(output_file, 'w') as f:
             json.dump(data, f, indent=2)
         
-        log.info(f"Converted {input_file} to JSON format")
+        self.log.info(f"Converted {input_file} to JSON format")
         return output_file
 
     async def _send_single(self, file_path: Path, base_path: Path):
         """Process a single file with backup and format conversion."""
-        # Backup original file
-        original_dir = base_path / "inputs" / "original"
-        original_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(file_path, original_dir / file_path.name)
-        
-        # Convert to JSONL for processing
-        jsonl_file = FileConverter.convert_to_jsonl(file_path, base_path)
-        
-        # Read all lines from the JSONL file
-        with open(jsonl_file, 'r') as f:
-            items = [json.loads(line) for line in f if line.strip()]
-        
-        results = []
-        for item in items:
-            # Choose provider-specific body
-            if isinstance(self.api, DeepLAdapter):
-                body_or_payload = item
-            else:
-                body_or_payload = self._build_openai_body(item)
-
-            # Try to get from memory cache first
-            async def send_request():
-                log.info(f"Sending request for item in {file_path.name}")
-                response = await self.api.send_single(body_or_payload)
-                
-                # Convert response to dict for JSON serialization
-                if hasattr(response, 'model_dump'):
-                    response = response.model_dump()
-                
-                # Check similarity if enabled
-                if self.similarity_checker and self._check_similarity_enabled():
-                    is_similar, similarity = self.similarity_checker.check_similarity(response)
-                    if is_similar and similarity > 0.0:  # Only apply cooldown if actually similar
-                        cooldown_time = self.similarity_checker.get_cooldown_time()
-                        log.warning(
-                            f"Similar response detected (similarity: {similarity:.2f}). "
-                            f"Applying cooldown of {cooldown_time} seconds."
-                        )
-                        await asyncio.sleep(cooldown_time)
-                
-                return response
-
-            response = await self.memory_cache.get_or_set(body_or_payload, send_request)
-            results.append(response)
+        try:
+            # Backup original file
+            original_dir = base_path / "inputs" / "original"
+            original_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(file_path, original_dir / file_path.name)
             
-            # Also update the file cache
-            await self.cache.set(f"{file_path.name}_{len(results)}", response)
+            # Convert to JSONL for processing
+            jsonl_file = FileConverter.convert_to_jsonl(file_path, base_path)
+            
+            # Read all lines from the JSONL file
+            with open(jsonl_file, 'r') as f:
+                items = [json.loads(line) for line in f if line.strip()]
+            
+            results = []
+            for item in items:
+                # Choose provider-specific body
+                if isinstance(self.api, DeepLAdapter):
+                    body_or_payload = item
+                else:
+                    body_or_payload = self._build_openai_body(item)
 
-        # Save both raw and parsed responses
-        output_dir = base_path / "outputs"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Save raw response
-        raw_output = output_dir / f"{file_path.stem}_response.json"
-        with open(raw_output, 'w') as f:
-            json.dump(results, f, indent=2)
-        
-        # Save parsed response
-        parsed_output = output_dir / f"parsed_{file_path.stem}_response.jsonl"
-        with open(parsed_output, 'w') as f:
-            for response in results:
-                if isinstance(response, dict):
-                    content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
-                    f.write(json.dumps({"content": content}) + '\n')
+                # Check cache first
+                cache_key = f"{file_path.name}_{len(results)}"
+                try:
+                    cached_response = await self.cache.get(cache_key)
+                    if cached_response is not None:
+                        results.append(cached_response)
+                        continue
+                except Exception as cache_err:
+                    self.log.debug(f"Cache miss for key {cache_key}: {str(cache_err)}")
 
-        return file_path, results
+                # If not in cache, send request
+                try:
+                    self.log.info(f"Sending request for item in {file_path.name}")
+                    response = await self.api.send_single(body_or_payload)
+                    
+                    # Convert response to dict for JSON serialization
+                    if hasattr(response, 'model_dump'):
+                        response = response.model_dump()
+                    
+                    # Check similarity if enabled
+                    if self.similarity_checker and self._check_similarity_enabled(self.config):
+                        is_similar, similarity = self.similarity_checker.check_similarity(response)
+                        if is_similar and similarity > 0.0:  # Only apply cooldown if actually similar
+                            cooldown_time = self.similarity_checker.get_cooldown_time()
+                            self.log.warning(
+                                f"Similar response detected (similarity: {similarity:.2f}). "
+                                f"Applying cooldown of {cooldown_time} seconds."
+                            )
+                            await asyncio.sleep(cooldown_time)
+                    
+                    # Store in cache
+                    try:
+                        await self.cache.set(cache_key, response)
+                    except Exception as cache_err:
+                        self.log.warning(f"Failed to cache response for {cache_key}: {str(cache_err)}")
+                    
+                    results.append(response)
+                except Exception as e:
+                    self.log.error(f"Error sending request for {file_path.name}: {str(e)}")
+                    raise
+
+            # Save responses
+            output_dir = base_path / "outputs"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Save raw response
+            raw_output = output_dir / f"{file_path.stem}_raw_response.json"
+            with open(raw_output, 'w') as f:
+                json.dump(results, f, indent=2)
+            
+            # Format responses using ResponseFormatter
+            try:
+                # Get user_id from the task path (parent directory of base_path)
+                user_id = base_path.parent.name
+                task_name = base_path.name
+
+                # Read the input file to get the original prompts
+                input_file = base_path / "inputs" / file_path.name
+                with open(input_file, 'r') as f:
+                    input_data = json.load(f)
+                if not isinstance(input_data, list):
+                    input_data = [input_data]
+
+                # Get config values for prompt fields
+                prompt_key = self.config.openai.prompt if hasattr(self.config, 'openai') else "input_text"
+                is_dynamic = getattr(self.config.openai.system_instruction, 'is_dynamic', False) if hasattr(self.config, 'openai') else False
+                sys_prompt_key = getattr(self.config.openai.system_instruction, 'system_prompt', 'instructions') if hasattr(self.config, 'openai') else 'instructions'
+
+                # Format the responses
+                formatted_results = []
+                for i, (input_item, response) in enumerate(zip(input_data, results)):
+                    try:
+                        # Get user content from input
+                        if isinstance(input_item, str):
+                            user_content = input_item
+                        elif isinstance(input_item, dict):
+                            if prompt_key in input_item:
+                                user_content = input_item[prompt_key]
+                            elif len(input_item) == 1:
+                                user_content = next(iter(input_item.values()))
+                            else:
+                                user_content = str(input_item)
+                        else:
+                            user_content = str(input_item)
+
+                        # Get system content
+                        system_content = input_item.get(sys_prompt_key, "You are a helpful assistant") if is_dynamic else "You are a helpful assistant"
+
+                        # Get assistant content from response
+                        if isinstance(response, dict):
+                            if "choices" in response:
+                                assistant_content = response["choices"][0]["message"]["content"]
+                            elif "translated_text" in response:
+                                assistant_content = response["translated_text"]
+                            else:
+                                assistant_content = str(response)
+                        else:
+                            assistant_content = str(response)
+
+                        formatted_results.append({
+                            "system": system_content,
+                            "user": user_content,
+                            "assistant": assistant_content
+                        })
+                    except Exception as e:
+                        self.log.error(f"Error formatting response {i}: {str(e)}")
+                        formatted_results.append({
+                            "system": "error",
+                            "user": "error",
+                            "assistant": f"Error formatting response: {str(e)}"
+                        })
+
+                # Save formatted response
+                formatted_output = output_dir / f"{file_path.stem}_formatted_response.json"
+                with open(formatted_output, 'w') as f:
+                    json.dump(formatted_results, f, indent=2)
+                
+                # Save parsed response (content only)
+                parsed_output = output_dir / f"parsed_{file_path.stem}_response.jsonl"
+                with open(parsed_output, 'w') as f:
+                    for result in formatted_results:
+                        f.write(json.dumps({"content": result["assistant"]}) + '\n')
+                
+                self.log.info(f"Formatted and parsed responses for {file_path.name}")
+            except Exception as e:
+                self.log.error(f"Error formatting responses: {str(e)}")
+                raise
+
+            return file_path, results
+        except Exception as e:
+            self.log.error(f"Error in _send_single for {file_path}: {str(e)}")
+            raise
 
     @staticmethod
     def _build_jsonl_file(payloads: list[dict], base: Path) -> Path:
@@ -322,7 +446,7 @@ class RequestService:
 
                                 msg = f"Batch results saved to {final_path} ({size} items)"
                                 log_f.write(msg + "\n")
-                                log.info(msg)
+                                self.log.info(msg)
                             except Exception as dl_err:
                                 log_f.write(f"Failed to download results: {dl_err}\n")
 
@@ -378,12 +502,12 @@ class RequestService:
     async def execute(self, task: Task, base_path: Path) -> str | None:
         """Return job_id when batch is launched else None."""
         task.status = TaskStatus.RUNNING
-        log.info(f"Executing task: {task.task_name} in {base_path}")
+        self.log.info(f"Executing task: {task.task_name} in {base_path}")
 
         # Initialize similarity checker if enabled
-        if self._check_similarity_enabled():
+        if self._check_similarity_enabled(self.config):
             self.similarity_checker = SimilarityChecker(base_path, self.config)
-            log.info("Similarity checking enabled")
+            self.log.info("Similarity checking enabled")
 
         # Create necessary directories
         FileConverter.ensure_directory_structure(base_path)
@@ -396,20 +520,20 @@ class RequestService:
         files = list(inputs_path.glob("*.json")) + list(inputs_path.glob("*.jsonl"))
         
         if self._sampling_enabled(self.config):
-            log.info("Sampling enabled, creating JSONL file")
+            self.log.info("Sampling enabled, creating JSONL file")
             limit = self._sample_size(self.config)
             if limit and len(files) > limit:
                 files = random.sample(files, limit)
-                log.info(f"Sampling enabled → taking {limit} of {len(files)} input files")
+                self.log.info(f"Sampling enabled → taking {limit} of {len(files)} input files")
 
         if not files:
-            log.error(f"No input files in {inputs_path}")
+            self.log.error(f"No input files in {inputs_path}")
             task.status = TaskStatus.FAILED
             return None
 
         # Calculate number of concurrent tasks
         n_tasks = min(len(files), self._calculate_process_cap(self.config))
-        log.info(f"Using {n_tasks} concurrent tasks for processing")
+        self.log.info(f"Using {n_tasks} concurrent tasks for processing")
 
         try:
             outputs_path.mkdir(parents=True, exist_ok=True)
@@ -423,24 +547,48 @@ class RequestService:
             # Wait for all tasks to complete
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
-            for fname, responses in results:
-                if isinstance(responses, Exception):
-                    log.error(f"Error processing {fname.name}: {str(responses)}")
+            for result in results:
+                if isinstance(result, Exception):
+                    self.log.error(f"Error processing file: {str(result)}")
                     task.status = TaskStatus.FAILED
                     return None
                 
-                # Save each response separately
-                for i, response in enumerate(responses):
-                    out_name = self._result_filename(fname, self.task_name, i + 1)
-                    output_file = outputs_path / out_name
-                    output_file.write_text(json.dumps(response, indent=2))
-                    log.info(f"Saved response {i + 1} for {fname.name} → {out_name}")
+                if result is None:
+                    self.log.error("Received None result from _send_single")
+                    task.status = TaskStatus.FAILED
+                    return None
+                
+                try:
+                    fname, responses = result
+                    if responses is None:
+                        self.log.error(f"Received None responses for {fname}")
+                        task.status = TaskStatus.FAILED
+                        return None
+                    
+                    # Save each response separately
+                    for i, response in enumerate(responses):
+                        if response is None:
+                            self.log.error(f"Received None response at index {i} for {fname}")
+                            continue
+                            
+                        out_name = self._result_filename(fname, self.task_name, i + 1)
+                        output_file = outputs_path / out_name
+                        output_file.write_text(json.dumps(response, indent=2))
+                        self.log.info(f"Saved response {i + 1} for {fname.name} → {out_name}")
+                except Exception as e:
+                    self.log.error(f"Error processing result: {str(e)}")
+                    task.status = TaskStatus.FAILED
+                    return None
 
-            await self.cache.flush_to_disk()
+            try:
+                await self.cache.flush_to_disk()
+            except Exception as e:
+                self.log.warning(f"Failed to flush cache to disk: {str(e)}")
+
             task.status = TaskStatus.SUCCESS
             return None
         except Exception as e:
-            log.error(f"Error in execute: {str(e)}")
+            self.log.error(f"Error in execute: {str(e)}")
             task.status = TaskStatus.FAILED
             return None
         finally:
@@ -483,7 +631,7 @@ class RequestService:
             try:
                 return self.config["openai"]["api_information"]["model"]
             except (KeyError, TypeError):
-                log.error("Failed to retrieve OpenAI model from config")
+                self.log.error("Failed to retrieve OpenAI model from config")
                 return "gpt-4o"  # Default fallback
 
     # ───────────────────────────────────────────────────────────────────
@@ -551,7 +699,7 @@ class RequestService:
                 raise ValueError(f"Required prompt field '{prompt_key}' not found in input")
 
             if is_dyn and not system_content:
-                log.warning(f"Dynamic system prompt field '{sys_prompt_key}' not found, using default")
+                self.log.warning(f"Dynamic system prompt field '{sys_prompt_key}' not found, using default")
                 system_content = "You are a helpful assistant"
 
             return user_content, system_content
@@ -568,7 +716,7 @@ class RequestService:
                 ],
             }
         except Exception as e:
-            log.error(f"Error building OpenAI body: {str(e)}")
+            self.log.error(f"Error building OpenAI body: {str(e)}")
             raise
 
     @staticmethod
@@ -806,7 +954,7 @@ class RequestService:
                         all_results.extend(batch_results.get("responses", []))
                     
                 except Exception as e:
-                    log.error(f"Error processing batch {batch_file} with {service}: {str(e)}")
+                    self.log.error(f"Error processing batch {batch_file} with {service}: {str(e)}")
                     raise
             
             # Combine results if configured
@@ -824,7 +972,7 @@ class RequestService:
             return all_results
             
         except Exception as e:
-            log.error(f"Error processing batch {input_file.name}: {str(e)}")
+            self.log.error(f"Error processing batch {input_file.name}: {str(e)}")
             return [{"error": str(e)}]
         finally:
             # Clean up
