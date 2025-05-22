@@ -23,33 +23,132 @@
 ---
 
 ## 🏗️ Architecture
+
+### System Overview
+
+Mitrailleuse follows a clean, layered architecture with clear separation of concerns:
+
 ```
-           +------------------------------+
-           |           Clients            |
-           |  (Postman, grpcurl, CLI)     |
-           +------------------------------+
-                        │ gRPC
-                        ▼
-           +------------------------------+
-           |  Mitrailleuse gRPC Server    |
-           |  • Health + Reflection       |
-           |  • RequestService            |
-           +-------------┬----------------+
-                         │ chooses adapter
-           ┌─────────────┴───────────────┐
-           │                             │
-+------------------+         +------------------+
-|  OpenAIAdapter   |         | DeepSeekAdapter  |
-|  – batch + chat  |         |  – chat          |
-+------------------+         +------------------+
-           │                             │
-           └─────────────┬───────────────┘
-                         │
-               +------------------+
-               |  DeepLAdapter    |
-               |  – translate     |
-               +------------------+
+┌─────────────────────────────────────────────────────────────────┐
+│                        Client Layer                             │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
+│  │   CLI       │  │  gRPC       │  │  Other Clients          │  │
+│  │  Interface  │  │  Clients    │  │  (Postman, grpcurl)     │  │
+│  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │ gRPC
+┌───────────────────────────▼─────────────────────────────────────┐
+│                      Application Layer                          │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │                 gRPC Service Interface                   │    │
+│  │  • CreateTask                                          │    │
+│  │  • SendSingle                                          │    │
+│  │  • CreateBatch                                         │    │
+│  │  • CheckBatchStatus                                    │    │
+│  │  • DownloadBatchResults                                │    │
+│  └─────────────────────────────────────────────────────────┘    │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+┌───────────────────────────▼─────────────────────────────────────┐
+│                      Domain Layer                               │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  │
+│  │  Task          │  │  Batch          │  │  Config         │  │
+│  │  Management    │  │  Processing     │  │  Management     │  │
+│  └─────────────────┘  └─────────────────┘  └─────────────────┘  │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+┌───────────────────────────▼─────────────────────────────────────┐
+│                    Infrastructure Layer                          │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  │
+│  │  OpenAI        │  │  DeepSeek       │  │  DeepL          │  │
+│  │  Adapter       │  │  Adapter        │  │  Adapter        │  │
+│  └─────────────────┘  └─────────────────┘  └─────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
 ```
+
+### Layer Descriptions
+
+#### 1. Client Layer
+- **CLI Interface**: Command-line tool for task management and execution
+- **gRPC Clients**: Direct gRPC interface consumers
+- **Other Clients**: Tools like Postman and grpcurl for testing and integration
+
+#### 2. Application Layer
+- **gRPC Service Interface**: Core service endpoints
+  - Task creation and management
+  - Single request processing
+  - Batch job handling
+  - Status monitoring
+  - Result retrieval
+
+#### 3. Domain Layer
+- **Task Management**: Handles task lifecycle and organization
+  - Task creation and validation
+  - Directory structure management
+  - Status tracking
+- **Batch Processing**: Manages batch operations
+  - Job queuing and scheduling
+  - Progress monitoring
+  - Result aggregation
+- **Config Management**: Configuration handling
+  - Provider-specific settings
+  - General system configuration
+  - Dynamic prompt mapping
+
+#### 4. Infrastructure Layer
+- **Provider Adapters**: Implements provider-specific logic
+  - OpenAI Adapter: GPT models and batch processing
+  - DeepSeek Adapter: Chat completion support
+  - DeepL Adapter: Translation services
+
+### Key Architectural Features
+
+1. **Task Organization**
+   - Hierarchical task structure: `tasks/<user_id>/<api>_<task>_<timestamp>/`
+   - Separate directories for inputs, outputs, logs, and configuration
+   - Automatic file flattening for consistent processing
+
+2. **Provider Abstraction**
+   - Common interface for all AI providers
+   - Pluggable adapter system for easy provider addition
+   - Consistent error handling and response formatting
+
+3. **Batch Processing**
+   - Configurable batch sizes and check intervals
+   - Support for batch combination and file-based batching
+   - Progress tracking and status monitoring
+
+4. **Performance Optimizations**
+   - In-memory and file-based caching
+   - Configurable sampling for quick testing
+   - Similarity checking to prevent duplicate processing
+
+5. **Monitoring and Logging**
+   - Comprehensive logging system
+   - Health checks and reflection support
+   - Batch job status tracking
+
+### Data Flow
+
+1. **Task Creation**
+   ```
+   Client → gRPC Service → Task Manager → Directory Creation → Config Setup
+   ```
+
+2. **Request Processing**
+   ```
+   Client → gRPC Service → Task Manager → Provider Adapter → AI Provider
+   ```
+
+3. **Batch Processing**
+   ```
+   Client → gRPC Service → Batch Manager → Provider Adapter → AI Provider
+   ```
+
+4. **Result Handling**
+   ```
+   AI Provider → Provider Adapter → Result Processor → Output Storage
+   ```
 
 ## Quick start
 
@@ -125,54 +224,180 @@ Should list `mitrailleuse.MitrailleuseService`.
 
 ```jsonc
 {
-  "general": {
-    "verbose": true,
-    "sampling": { "enable_sampling": true, "sample_size": 100 },
-    "check_similarity": true,
-    "similarity_settings": {
-      "similarity_threshold": 0.8,
-      "cooldown_period": 300,
-      "max_recent_responses": 100
-    }
-  },
+  "task_name": "openai_test_shot_21_04_2025_155231",
+  "user_id": "user1",
 
   "openai": {
-    "prompt": "input_text",
-    "system_instruction": {
-      "is_dynamic": true,
-      "system_prompt": "instructions"
-    },
-    "api_information": { "model": "gpt-4o-mini" },
     "batch": {
       "is_batch_active": true,
-      "batch_size": 20,
       "batch_check_time": 120,
+      "batch_size": 20,
       "combine_batches": false
+    },
+    "prompt": "input_text",
+    "system_instruction": {
+      "is_dynamic": false,
+      "system_prompt": ""
+    },
+    "api_key": "${OPENAI_API_KEY}",
+    "api_information": {
+      "model": "gpt-4o",
+      "setting": {
+        "temperature": 1.0,
+        "max_tokens": 16000
+      }
+    },
+    "bulk_save": 10,
+    "sleep_time": 0,
+    "proxies": {
+      "proxies_enabled": false,
+      "http": "http://corporate-proxy:8080/",
+      "https": "http://corporate-proxy:8080/"
     }
   },
 
   "deepseek": {
-    "prompt": "input_text",
-    "system_instruction": {
-      "is_dynamic": true,
-      "system_prompt": "instructions"
-    },
-    "api_information": { "model": "deepseek-chat" },
     "batch": {
       "is_batch_active": true,
-      "batch_size": 20,
       "batch_check_time": 120,
+      "batch_size": 20,
       "combine_batches": false
+    },
+    "prompt": "input_text",
+    "system_instruction": {
+      "is_dynamic": false,
+      "system_prompt": ""
+    },
+    "api_key": "${DEEPSEEK_API_KEY}",
+    "api_information": {
+      "model": "gpt-4o",
+      "setting": {
+        "temperature": 1.0,
+        "max_tokens": 16000
+      }
+    },
+    "bulk_save": 10,
+    "sleep_time": 0,
+    "proxies": {
+      "proxies_enabled": false,
+      "http": "http://corporate-proxy:8080/",
+      "https": "http://corporate-proxy:8080/"
     }
   },
 
   "deepl": {
     "api_key": "${DEEPL_API_KEY}",
-    "target_lang": "lang",   // field name inside input JSON
-    "text": "content"        // field with text to translate
+    "target_lang": "target_lang",
+    "text": "text"
+  },
+
+  "general": {
+    "verbose": true,
+    "sampling": {
+      "enable_sampling": true,
+      "sample_size": 100
+    },
+    "logs": {
+      "log_file": "log.log",
+      "log_to_file": true,
+      "log_to_db": false,
+      "log_buffer_size": 10
+    },
+    "multiprocessing_enabled": true,
+    "num_processes": 10,
+    "process_cap_percentage": 75,
+    "db": {
+      "postgres": {
+        "host": "localhost",
+        "port": "5432",
+        "username": "postgres",
+        "password": "postgres",
+        "database": "mitrailleuse"
+      }
+    },
+    "similarity_check": {
+      "enabled": false,
+      "settings": {
+        "similarity_threshold": 0.8,
+        "cooldown_period": 300,
+        "max_recent_responses": 100,
+        "close_after_use": false
+      }
+    }
   }
 }
 ```
+
+### Configuration Fields
+
+#### Root Level
+- `task_name` (string): Unique identifier for the task
+- `user_id` (string): User identifier for task organization
+
+#### OpenAI Configuration
+- `api_key` (string): OpenAI API key (use environment variable `${OPENAI_API_KEY}`)
+- `api_information`:
+  - `model` (string): OpenAI model to use (e.g., "gpt-4", "gpt-3.5-turbo")
+  - `setting`:
+    - `temperature` (float): Controls randomness (0.0 to 1.0)
+    - `max_tokens` (integer): Maximum tokens in response
+- `prompt` (string): Field name in input JSON containing the prompt
+- `system_instruction`:
+  - `is_dynamic` (boolean): Whether to use dynamic system prompts
+  - `system_prompt` (string): Default system prompt if not dynamic
+- `batch`:
+  - `is_batch_active` (boolean): Enable batch processing
+  - `batch_size` (integer): Number of items per batch
+  - `batch_check_time` (integer): Seconds between batch status checks
+  - `combine_batches` (boolean): Whether to combine batch results
+  - `file_batch` (boolean): Use file-based batch processing
+
+#### General Configuration
+- `verbose` (boolean): Enable detailed logging
+- `multiprocessing_enabled` (boolean): Enable parallel processing
+- `num_processes` (integer): Number of parallel processes
+- `process_cap_percentage` (integer): Maximum CPU usage percentage
+- `logs`:
+  - `log_file` (string): Path to log file
+  - `log_to_file` (boolean): Enable file logging
+  - `log_buffer_size` (integer): Number of log entries to buffer
+- `sampling`:
+  - `enable_sampling` (boolean): Enable input sampling
+  - `sample_size` (integer): Number of items to sample
+- `similarity_check`:
+  - `enabled` (boolean): Enable response similarity checking
+  - `settings`:
+    - `similarity_threshold` (float): Minimum similarity score (0.0 to 1.0)
+    - `cooldown_period` (integer): Seconds to wait after similar response
+    - `max_recent_responses` (integer): Number of responses to check
+    - `close_after_use` (boolean): Close similarity checker after each use
+
+### Environment Variables
+```bash
+export OPENAI_API_KEY="sk-..."  # Your OpenAI API key
+```
+
+### Best Practices
+
+1. **API Keys**
+   - Never commit API keys to version control
+   - Use environment variables for sensitive data
+   - Rotate keys regularly
+
+2. **Batch Processing**
+   - Adjust batch size based on API limits
+   - Monitor batch check time for rate limits
+   - Use file batch for large datasets
+
+3. **Resource Management**
+   - Set process cap based on system resources
+   - Monitor memory usage with large batches
+   - Adjust buffer sizes for your workload
+
+4. **Similarity Checking**
+   - Start with high threshold (0.8)
+   - Adjust cooldown based on API limits
+   - Monitor response quality
 
 ---
 
@@ -207,6 +432,185 @@ python -m mitrailleuse.main execute --user-id user1 --task-folder /path/to/task
 * Similarity checking to prevent duplicate responses
 * Caching for improved performance
 
+## 🎯 SimpleClient - Core Application
+
+The SimpleClient is a standalone Python application that provides direct access to AI providers without requiring the gRPC server. It's designed for high-throughput processing of AI requests with advanced features like caching, similarity checking, and batch processing.
+
+### Key Features
+
+- **Direct Provider Integration**: Direct integration with OpenAI, DeepSeek, and DeepL APIs
+- **Advanced Caching**: In-memory and file-based caching for improved performance
+- **Similarity Checking**: Prevents duplicate responses with configurable thresholds
+- **Batch Processing**: Efficient batch processing with progress monitoring
+- **File Management**: Automatic file conversion and organization
+- **Resource Management**: Dynamic thread management based on system resources
+
+### Usage
+
+```python
+from mitrailleuse.scripts.simple_client import SimpleClient
+
+# Initialize client with config
+client = SimpleClient("path/to/config.json")
+
+# Process files with OpenAI
+results = await client.process_all_files(service="openai")
+
+# Process files with DeepL
+results = await client.process_all_files(service="deepl")
+```
+
+### Directory Structure
+
+```
+task_directory/
+├─ config/
+│   └─ config.json           # Task-specific configuration
+├─ inputs/
+│   ├─ backup/              # Original input file backups
+│   ├─ original/            # Preserved original files
+│   └─ *.json/jsonl         # Input files to process
+├─ outputs/
+│   ├─ *_raw_response.json  # Raw API responses
+│   ├─ *_formatted_response.json  # Formatted responses
+│   └─ parsed_*_response.jsonl    # Parsed content
+├─ cache/                   # Response cache
+└─ logs/                    # Processing logs
+```
+
+### Configuration
+
+The SimpleClient uses a JSON configuration file with the following structure:
+
+```json
+{
+    "task_name": "openai_test",
+    "user_id": "user1",
+    "openai": {
+        "api_key": "YOUR_OPENAI_KEY",
+        "api_information": {
+            "model": "gpt-4",
+            "setting": {
+                "temperature": 0.7,
+                "max_tokens": 2000
+            }
+        },
+        "prompt": "input_text",
+        "system_instruction": {
+            "is_dynamic": false,
+            "system_prompt": ""
+        },
+        "batch": {
+            "is_batch_active": true,
+            "batch_size": 5,
+            "batch_check_time": 120,
+            "combine_batches": false,
+            "file_batch": false
+        }
+    },
+    "general": {
+        "verbose": true,
+        "multiprocessing_enabled": true,
+        "num_processes": 4,
+        "process_cap_percentage": 75,
+        "logs": {
+            "log_file": "log.log",
+            "log_to_file": true,
+            "log_buffer_size": 10
+        },
+        "sampling": {
+            "enable_sampling": false,
+            "sample_size": 50
+        },
+        "similarity_check": {
+            "enabled": false,
+            "settings": {
+                "similarity_threshold": 0.8,
+                "cooldown_period": 300,
+                "max_recent_responses": 100,
+                "close_after_use": false
+            }
+        }
+    }
+} 
+```
+
+### Performance Features
+
+1. **Resource Management**
+   - Dynamic thread calculation based on CPU cores
+   - Configurable process cap percentage
+   - Automatic resource scaling
+
+2. **Caching System**
+   - In-memory caching for frequent requests
+   - File-based caching for persistence
+   - Configurable cache size and expiration
+
+3. **Batch Processing**
+   - Configurable batch sizes
+   - Progress monitoring
+   - Automatic retry on failure
+   - Batch combination options
+
+4. **Similarity Checking**
+   - Configurable similarity thresholds
+   - Cooldown periods
+   - Recent response tracking
+   - Automatic duplicate prevention
+
+### Error Handling
+
+- Comprehensive error logging
+- Automatic retry mechanisms
+- Detailed error reporting
+- Graceful failure handling
+
+### Example Workflow
+
+```python
+async def process_files():
+    # Initialize client
+    client = SimpleClient("config.json")
+    
+    try:
+        # Process with OpenAI
+        openai_results = await client.process_all_files(service="openai")
+        
+        # Process with DeepL
+        deepl_results = await client.process_all_files(service="deepl")
+        
+        # Get cache statistics
+        cache_stats = client.get_cache_stats()
+        print(f"Cache hits: {cache_stats['hits']}")
+        
+    finally:
+        # Clean up resources
+        client.close()
+```
+
+### Best Practices
+
+1. **Resource Management**
+   - Use appropriate batch sizes
+   - Monitor system resources
+   - Implement proper cleanup
+
+2. **Error Handling**
+   - Implement retry mechanisms
+   - Log errors appropriately
+   - Handle API rate limits
+
+3. **Performance**
+   - Utilize caching effectively
+   - Configure similarity checking
+   - Optimize batch sizes
+
+4. **Security**
+   - Secure API key storage
+   - Implement proper access controls
+   - Monitor API usage
+
 ---
 
 ## 🗄️ Directory structure (runtime)
@@ -240,15 +644,67 @@ mitrailleuse/
 
 ---
 
-## 🛰️ gRPC API reference (proto excerpt)
+## 🛰️ gRPC API reference
 
 ```proto
 service MitrailleuseService {
-  rpc CreateTask           (CreateTaskRequest)           returns (TaskEnvelope);
-  rpc SendSingle           (SingleRequest)               returns (SingleResponse);
-  rpc CreateBatch          (BatchRequest)                returns (BatchJob);
-  rpc CheckBatchStatus     (BatchStatusRequest)          returns (BatchJob);
-  rpc DownloadBatchResults (BatchResultRequest)          returns (stream BatchLine);
+  rpc CreateTask (CreateTaskRequest) returns (CreateTaskResponse);
+  rpc ExecuteTask (ExecuteTaskRequest) returns (ExecuteTaskResponse);
+  rpc GetTaskStatus (GetTaskStatusRequest) returns (GetTaskStatusResponse);
+  rpc ListTasks (ListTasksRequest) returns (ListTasksResponse);
+  rpc GetTaskByPath (GetTaskByPathRequest) returns (TaskInfo);
+}
+
+// Request/Response Messages
+message CreateTaskRequest {
+  string user_id = 1;
+  string api_name = 2;
+  string task_name = 3;
+  string config_json = 4;  // raw json of Config
+}
+
+message CreateTaskResponse {
+  string task_folder = 1;
+}
+
+message ExecuteTaskRequest {
+  string user_id = 1;
+  string task_folder = 2;
+}
+
+message ExecuteTaskResponse {
+  string status = 1;
+  string job_id = 2;   // empty when not a batch
+}
+
+message GetTaskStatusRequest {
+  string user_id = 1;
+  string task_folder = 2;
+}
+
+message GetTaskStatusResponse {
+  string status = 1;
+}
+
+message ListTasksRequest {
+  string user_id = 1;
+  string task_name = 2;
+}
+
+message ListTasksResponse {
+  repeated TaskInfo tasks = 1;
+}
+
+message GetTaskByPathRequest {
+  string task_path = 1;
+}
+
+message TaskInfo {
+  string user_id = 1;
+  string api_name = 2;
+  string task_name = 3;
+  string status = 4;
+  string path = 5;
 }
 ```
 
