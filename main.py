@@ -17,6 +17,9 @@ from mitrailleuse import mitrailleuse_pb2, mitrailleuse_pb2_grpc
 from mitrailleuse.config.config import Config
 from mitrailleuse.infrastructure.adapters.openai_adapter import OpenAIAdapter
 
+# Define the root directory for task outputs
+ROOT = Path("tasks")
+
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
