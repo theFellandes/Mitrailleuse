@@ -40,28 +40,28 @@ Mitrailleuse follows a clean, layered architecture with clear separation of conc
 ┌───────────────────────────▼─────────────────────────────────────┐
 │                      Application Layer                          │
 │  ┌─────────────────────────────────────────────────────────┐    │
-│  │                 gRPC Service Interface                   │    │
-│  │  • CreateTask                                          │    │
-│  │  • SendSingle                                          │    │
-│  │  • CreateBatch                                         │    │
-│  │  • CheckBatchStatus                                    │    │
-│  │  • DownloadBatchResults                                │    │
+│  │                 gRPC Service Interface                  │    │
+│  │  • CreateTask                                           │    │
+│  │  • SendSingle                                           │    │
+│  │  • CreateBatch                                          │    │
+│  │  • CheckBatchStatus                                     │    │
+│  │  • DownloadBatchResults                                 │    │
 │  └─────────────────────────────────────────────────────────┘    │
 └───────────────────────────┬─────────────────────────────────────┘
                             │
 ┌───────────────────────────▼─────────────────────────────────────┐
 │                      Domain Layer                               │
 │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  │
-│  │  Task          │  │  Batch          │  │  Config         │  │
-│  │  Management    │  │  Processing     │  │  Management     │  │
+│  │  Task           │  │  Batch          │  │  Config         │  │
+│  │  Management     │  │  Processing     │  │  Management     │  │
 │  └─────────────────┘  └─────────────────┘  └─────────────────┘  │
 └───────────────────────────┬─────────────────────────────────────┘
                             │
 ┌───────────────────────────▼─────────────────────────────────────┐
-│                    Infrastructure Layer                          │
+│                    Infrastructure Layer                         │
 │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  │
-│  │  OpenAI        │  │  DeepSeek       │  │  DeepL          │  │
-│  │  Adapter       │  │  Adapter        │  │  Adapter        │  │
+│  │  OpenAI         │  │  DeepSeek       │  │  DeepL          │  │
+│  │  Adapter        │  │  Adapter        │  │  Adapter        │  │
 │  └─────────────────┘  └─────────────────┘  └─────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```
