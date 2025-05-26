@@ -85,7 +85,7 @@ class TaskService:
             # Add cache configuration
             if not hasattr(cfg, "cache"):
                 cfg.cache = {
-                    "memory_cache_enabled": True,
+                    "memory_cache_enabled": False,  # Default to disabled
                     "memory_cache_ttl": 3600  # 1 hour default TTL
                 }
 
