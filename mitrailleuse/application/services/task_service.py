@@ -66,16 +66,21 @@ class TaskService:
 
         # Validate and ensure required fields are present
         if isinstance(cfg, Config):
-            # Ensure prompt field is set
-            if not hasattr(cfg, "prompt") or not cfg.prompt:
-                log.warning("No prompt field specified in config, using default 'input_text'")
-                cfg.prompt = "input_text"
+            # Get the API section
+            api_section = getattr(cfg, api_name.lower(), None)
+            if not api_section:
+                raise ValueError(f"API section '{api_name}' not found in config")
+
+            # Ensure prompt field is set in the API section
+            if not hasattr(api_section, "prompt") or not api_section.prompt:
+                log.warning(f"No prompt field specified in {api_name} config, using default 'input_text'")
+                setattr(api_section, "prompt", "input_text")
 
             # Ensure system instruction settings are valid
-            if not hasattr(cfg, "system_instruction"):
-                cfg.system_instruction = {"is_dynamic": False, "system_prompt": ""}
-            elif not isinstance(cfg.system_instruction, dict):
-                cfg.system_instruction = {"is_dynamic": False, "system_prompt": ""}
+            if not hasattr(api_section, "system_instruction"):
+                setattr(api_section, "system_instruction", {"is_dynamic": False, "system_prompt": ""})
+            elif not isinstance(api_section.system_instruction, dict):
+                setattr(api_section, "system_instruction", {"is_dynamic": False, "system_prompt": ""})
 
             # Add cache configuration
             if not hasattr(cfg, "cache"):
