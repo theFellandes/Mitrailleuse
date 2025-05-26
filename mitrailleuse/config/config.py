@@ -2,7 +2,7 @@ import json
 from typing import Dict, Optional, Any
 
 from pathlib import Path
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from mitrailleuse.config.deepl_config import DeeplConfig
 from mitrailleuse.config.deepseek_config import DeepseekConfig
@@ -66,6 +66,11 @@ class ProxyConfig(BaseModel):
     https: Optional[str] = None
 
 
+class CacheConfig(BaseModel):
+    memory_cache_enabled: bool = True
+    memory_cache_ttl: int = 3600  # 1 hour default TTL
+
+
 class BaseAPIConfig(BaseModel):
     api_key: str
     prompt: str = "input_text"
@@ -103,12 +108,15 @@ class GeneralConfig(BaseModel):
 
 
 class Config(BaseModel):
+    model_config = ConfigDict(extra='ignore')  # Allow extra fields in the config
+    
     task_name: str
     user_id: str
     openai: OpenAIConfig
     deepseek: DeepseekConfig
     deepl: DeeplConfig
     general: GeneralConfig
+    cache: CacheConfig = Field(default_factory=CacheConfig)  # Add cache configuration with default values
 
     def deep_update(self, base_dict: Dict[str, Any], update_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Recursively update a dictionary with another dictionary."""
