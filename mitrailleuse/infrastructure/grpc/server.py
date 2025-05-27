@@ -232,33 +232,61 @@ class MitrailleuseGRPC(mitrailleuse_pb2_grpc.MitrailleuseServiceServicer):
     def ListTasks(self, request, context):
         try:
             tasks = []
-            user_root = ROOT / request.user_id
-            if not user_root.exists():
-                log.info(f"No tasks directory found for user {request.user_id}")
-                return mitrailleuse_pb2.ListTasksResponse(tasks=[])
-
-            # Get all task directories and sort them
-            task_dirs = sorted([d for d in user_root.iterdir() if d.is_dir()], key=lambda x: x.name)
-            if not task_dirs:
-                log.info(f"No tasks found in directory {user_root}")
-                return mitrailleuse_pb2.ListTasksResponse(tasks=[])
-
-            log.info(f"Found {len(task_dirs)} tasks for user {request.user_id}")
             
-            # Create task info for each directory
-            for task_dir in task_dirs:
-                try:
-                    task = TaskService.status_from_path(task_dir)
-                    tasks.append(mitrailleuse_pb2.TaskInfo(
-                        user_id=request.user_id,
-                        api_name=task.api_name,
-                        task_name=task.task_name,
-                        status=task.status.value,
-                        path=str(task_dir)
-                    ))
-                except Exception as e:
-                    log.error(f"Error processing task {task_dir}: {str(e)}")
-                    continue
+            # If user_id is "all", list tasks for all users
+            if request.user_id.lower() == "all":
+                if not ROOT.exists():
+                    log.info("No tasks directory found")
+                    return mitrailleuse_pb2.ListTasksResponse(tasks=[])
+                
+                # Get all user directories
+                user_dirs = [d for d in ROOT.iterdir() if d.is_dir()]
+                for user_dir in user_dirs:
+                    user_id = user_dir.name
+                    # Get all task directories for this user
+                    task_dirs = sorted([d for d in user_dir.iterdir() if d.is_dir()], key=lambda x: x.name)
+                    for task_dir in task_dirs:
+                        try:
+                            task = TaskService.status_from_path(task_dir)
+                            tasks.append(mitrailleuse_pb2.TaskInfo(
+                                user_id=user_id,
+                                api_name=task.api_name,
+                                task_name=task.task_name,
+                                status=task.status.value,
+                                path=str(task_dir)
+                            ))
+                        except Exception as e:
+                            log.error(f"Error processing task {task_dir}: {str(e)}")
+                            continue
+            else:
+                # Original behavior for specific user
+                user_root = ROOT / request.user_id
+                if not user_root.exists():
+                    log.info(f"No tasks directory found for user {request.user_id}")
+                    return mitrailleuse_pb2.ListTasksResponse(tasks=[])
+
+                # Get all task directories and sort them
+                task_dirs = sorted([d for d in user_root.iterdir() if d.is_dir()], key=lambda x: x.name)
+                if not task_dirs:
+                    log.info(f"No tasks found in directory {user_root}")
+                    return mitrailleuse_pb2.ListTasksResponse(tasks=[])
+
+                log.info(f"Found {len(task_dirs)} tasks for user {request.user_id}")
+                
+                # Create task info for each directory
+                for task_dir in task_dirs:
+                    try:
+                        task = TaskService.status_from_path(task_dir)
+                        tasks.append(mitrailleuse_pb2.TaskInfo(
+                            user_id=request.user_id,
+                            api_name=task.api_name,
+                            task_name=task.task_name,
+                            status=task.status.value,
+                            path=str(task_dir)
+                        ))
+                    except Exception as e:
+                        log.error(f"Error processing task {task_dir}: {str(e)}")
+                        continue
 
             return mitrailleuse_pb2.ListTasksResponse(tasks=tasks)
         except Exception as exc:

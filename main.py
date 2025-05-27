@@ -21,13 +21,17 @@ import asyncio
 # Define the root directory for task outputs
 ROOT = Path("tasks")
 
+# Set up logging directory
+LOGS_DIR = Path("logs")
+LOGS_DIR.mkdir(exist_ok=True)
+
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(f'mitrailleuse_cli_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
+        logging.FileHandler(LOGS_DIR / f'mitrailleuse_cli_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
     ]
 )
 logger = logging.getLogger(__name__)
@@ -83,27 +87,41 @@ class MitrailleuseCLI:
             
             tasks = []
             if not response.tasks:
-                logger.info("No tasks found for user")
+                logger.info("No tasks found")
                 print("No tasks found.")
                 return tasks
 
-            logger.info(f"Found {len(response.tasks)} tasks")
-            print("\nAvailable Tasks:")
-            print("-" * 80)
-            for i, task in enumerate(response.tasks, 1):
-                print(f"#{i}")
-                print(f"Task Name: {task.task_name}")
-                print(f"API: {task.api_name}")
-                print(f"Status: {task.status}")
-                print(f"Path: {task.path}")
-                print("-" * 80)
-                tasks.append({
-                    "index": i,
-                    "task_name": task.task_name,
-                    "api_name": task.api_name,
-                    "status": task.status,
-                    "path": task.path
-                })
+            # Group tasks by user_id
+            tasks_by_user = {}
+            for task in response.tasks:
+                if task.user_id not in tasks_by_user:
+                    tasks_by_user[task.user_id] = []
+                tasks_by_user[task.user_id].append(task)
+
+            logger.info(f"Found tasks for {len(tasks_by_user)} users")
+            
+            # Print tasks grouped by user
+            for user_id, user_tasks in tasks_by_user.items():
+                print(f"\nTasks for User: {user_id}")
+                print("=" * 80)
+                
+                for i, task in enumerate(user_tasks, 1):
+                    print(f"#{i}")
+                    print(f"Task Name: {task.task_name}")
+                    print(f"API: {task.api_name}")
+                    print(f"Status: {task.status}")
+                    print(f"Path: {task.path}")
+                    print("-" * 80)
+                    
+                    tasks.append({
+                        "user_id": task.user_id,
+                        "task_number": i,
+                        "task_name": task.task_name,
+                        "api_name": task.api_name,
+                        "status": task.status,
+                        "path": task.path
+                    })
+            
             return tasks
         except Exception as e:
             logger.error(f"Failed to list tasks: {str(e)}")
@@ -270,7 +288,8 @@ def main():
 
     # List tasks command
     list_parser = subparsers.add_parser("list", help="List available tasks")
-    list_parser.add_argument("--user-id", required=True, help="User ID")
+    list_parser.add_argument("--user-id", required=True, help="User ID (use 'all' to list tasks for all users)")
+    list_parser.add_argument("--all", action="store_true", help="List tasks for all users (alternative to --user-id all)")
 
     # Get task command
     get_parser = subparsers.add_parser("get", help="Get task information")
@@ -296,7 +315,9 @@ def main():
         
         elif args.command == "list":
             logger.info("Starting task listing")
-            cli.list_tasks(args.user_id)
+            # Use 'all' if either --all flag is set or user_id is 'all'
+            user_id = "all" if args.all or args.user_id.lower() == "all" else args.user_id
+            cli.list_tasks(user_id)
         
         elif args.command == "get":
             logger.info(f"Getting task information for: {args.task_path}")
