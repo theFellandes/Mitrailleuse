@@ -91,13 +91,11 @@ class TaskService:
 
             # Ensure task_name is set correctly and save config
             try:
-                live_cfg = cfg.copy(update={
-                    "task_name": task.task_name,
-                    "user_id": task.user_id  # Add user_id to the config
-                })
+                # Create a filtered config with only the relevant API section
+                live_cfg = Config.create_filtered_config(cfg, task.api_name, task.user_id)
                 config_path = base_path / "config" / "config.json"
                 Config.write(live_cfg, base_path / "config" / "config.json")
-                log.info(f"Saved task config to {config_path}")
+                log.info(f"Saved task config to {config_path} with only {task.api_name} section")
             except Exception as e:
                 log.error(f"Failed to save config: {str(e)}")
                 # Use simplified approach as fallback

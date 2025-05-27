@@ -112,11 +112,40 @@ class Config(BaseModel):
     
     task_name: str
     user_id: str
-    openai: OpenAIConfig
-    deepseek: DeepseekConfig
-    deepl: DeeplConfig
+    openai: Optional[OpenAIConfig] = None
+    deepseek: Optional[DeepseekConfig] = None
+    deepl: Optional[DeeplConfig] = None
     general: GeneralConfig
     cache: CacheConfig = Field(default_factory=CacheConfig)  # Add cache configuration with default values
+
+    @classmethod
+    def create_filtered_config(cls, base_config: "Config", api_name: str, task_user_id: str) -> "Config":
+        """Create a new config with only the specified API section."""
+        # Start with base fields
+        filtered_data = {
+            "task_name": base_config.task_name,
+            "user_id": task_user_id,  # Use the task's user_id instead of base config's
+            "general": base_config.general.model_dump(),
+            "cache": base_config.cache.model_dump(),
+        }
+        
+        # Add only the specified API section
+        api_name = api_name.lower()
+        if api_name == "openai" and base_config.openai:
+            filtered_data["openai"] = base_config.openai.model_dump()
+        elif api_name == "deepseek" and base_config.deepseek:
+            filtered_data["deepseek"] = base_config.deepseek.model_dump()
+        elif api_name == "deepl" and base_config.deepl:
+            filtered_data["deepl"] = base_config.deepl.model_dump()
+            
+        # Create a new Config instance with only the filtered fields
+        return cls.model_validate(filtered_data, strict=False)
+
+    def model_dump(self, **kwargs) -> dict:
+        """Override model_dump to exclude None fields."""
+        data = super().model_dump(**kwargs)
+        # Remove any None values
+        return {k: v for k, v in data.items() if v is not None}
 
     def deep_update(self, base_dict: Dict[str, Any], update_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Recursively update a dictionary with another dictionary."""
