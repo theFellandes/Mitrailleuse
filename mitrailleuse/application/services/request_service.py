@@ -33,11 +33,12 @@ from mitrailleuse.infrastructure.utils.similarity_checker import SimilarityCheck
 from mitrailleuse.scripts.format_response import ResponseFormatter
 
 ADAPTERS = {
-    "openai":  OpenAIAdapter,
+    "openai": OpenAIAdapter,
     "deepseek": DeepSeekAdapter,
-    "deepl":    DeepLAdapter,
+    "deepl": DeepLAdapter,
     # extend here for any future provider
 }
+
 
 class RequestService:
     """Coordinates multiprocessing + caching + API adapter."""
@@ -48,6 +49,7 @@ class RequestService:
         self.memory_cache = MemoryCache()  # Add in-memory cache
         self.config = config
         self.similarity_checker = None  # Will be initialized in execute()
+        self.deepl_client = None  # Will be initialized if needed
 
         # ── derive the task-name once, for all filenames ───────────────────
         self.task_name: str | None = getattr(config, "task_name", None)
@@ -66,37 +68,41 @@ class RequestService:
         # Initialize task-specific logger
         self.log = self._setup_task_logger()
 
+        # Initialize DeepL client if needed
+        if isinstance(self.api, DeepLAdapter):
+            self.deepl_client = self.api
+
     def _setup_task_logger(self):
         """Set up task-specific logging."""
         # Get task directory from config
         task_dir = Path(getattr(self.config, "workdir", ".")).resolve()
         log_dir = task_dir / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Create a new log file for this task
         log_file = log_dir / f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-        
+
         # Configure task-specific logger
         logger = logging.getLogger(f"task_{self.task_name}")
         logger.setLevel(logging.INFO)
-        
+
         # Create file handler
         file_handler = logging.FileHandler(log_file)
         file_handler.setLevel(logging.INFO)
-        
+
         # Create console handler
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logging.INFO)
-        
+
         # Create formatter
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         file_handler.setFormatter(formatter)
         console_handler.setFormatter(formatter)
-        
+
         # Add handlers to logger
         logger.addHandler(file_handler)
         logger.addHandler(console_handler)
-        
+
         return logger
 
     # ---------------------------------------------------------- helpers
@@ -138,21 +144,21 @@ class RequestService:
         """Convert JSON file to JSONL format if needed and backup original."""
         # Backup the original file
         self._backup_input_file(input_file, base_path)
-        
+
         if input_file.suffix == '.jsonl':
             return input_file
 
         output_file = input_file.with_suffix('.jsonl')
         with open(input_file, 'r') as f:
             data = json.load(f)
-        
+
         if not isinstance(data, list):
             data = [data]
 
         with open(output_file, 'w') as f:
             for item in data:
                 f.write(json.dumps(item) + '\n')
-        
+
         self.log.info(f"Converted {input_file} to JSONL format")
         return output_file
 
@@ -160,7 +166,7 @@ class RequestService:
         """Convert JSONL file to JSON format if needed and backup original."""
         # Backup the original file
         self._backup_input_file(input_file, base_path)
-        
+
         if input_file.suffix == '.json':
             return input_file
 
@@ -170,7 +176,7 @@ class RequestService:
 
         with open(output_file, 'w') as f:
             json.dump(data, f, indent=2)
-        
+
         self.log.info(f"Converted {input_file} to JSON format")
         return output_file
 
@@ -181,14 +187,14 @@ class RequestService:
             original_dir = base_path / "inputs" / "original"
             original_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(file_path, original_dir / file_path.name)
-            
+
             # Convert to JSONL for processing
             jsonl_file = FileConverter.convert_to_jsonl(file_path, base_path)
-            
+
             # Read all lines from the JSONL file
             with open(jsonl_file, 'r') as f:
                 items = [json.loads(line) for line in f if line.strip()]
-            
+
             results = []
             for item in items:
                 # Choose provider-specific body
@@ -211,11 +217,11 @@ class RequestService:
                 try:
                     self.log.info(f"Sending request for item in {file_path.name}")
                     response = await self.api.send_single(body_or_payload)
-                    
+
                     # Convert response to dict for JSON serialization
                     if hasattr(response, 'model_dump'):
                         response = response.model_dump()
-                    
+
                     # Check similarity if enabled
                     if self.similarity_checker and self._check_similarity_enabled(self.config):
                         is_similar, similarity = self.similarity_checker.check_similarity(response)
@@ -226,13 +232,13 @@ class RequestService:
                                 f"Applying cooldown of {cooldown_time} seconds."
                             )
                             await asyncio.sleep(cooldown_time)
-                    
+
                     # Store in cache
                     try:
                         await self.cache.set(cache_key, response)
                     except Exception as cache_err:
                         self.log.warning(f"Failed to cache response for {cache_key}: {str(cache_err)}")
-                    
+
                     results.append(response)
                 except Exception as e:
                     self.log.error(f"Error sending request for {file_path.name}: {str(e)}")
@@ -241,12 +247,12 @@ class RequestService:
             # Save responses
             output_dir = base_path / "outputs"
             output_dir.mkdir(parents=True, exist_ok=True)
-            
+
             # Save raw response
             raw_output = output_dir / f"{file_path.stem}_raw_response.json"
             with open(raw_output, 'w') as f:
                 json.dump(results, f, indent=2)
-            
+
             # Format responses using ResponseFormatter
             try:
                 # Get user_id from the task path (parent directory of base_path)
@@ -262,8 +268,10 @@ class RequestService:
 
                 # Get config values for prompt fields
                 prompt_key = self.config.openai.prompt if hasattr(self.config, 'openai') else "input_text"
-                is_dynamic = getattr(self.config.openai.system_instruction, 'is_dynamic', False) if hasattr(self.config, 'openai') else False
-                sys_prompt_key = getattr(self.config.openai.system_instruction, 'system_prompt', 'instructions') if hasattr(self.config, 'openai') else 'instructions'
+                is_dynamic = getattr(self.config.openai.system_instruction, 'is_dynamic', False) if hasattr(self.config,
+                                                                                                            'openai') else False
+                sys_prompt_key = getattr(self.config.openai.system_instruction, 'system_prompt',
+                                         'instructions') if hasattr(self.config, 'openai') else 'instructions'
 
                 # Format the responses
                 formatted_results = []
@@ -283,7 +291,8 @@ class RequestService:
                             user_content = str(input_item)
 
                         # Get system content
-                        system_content = input_item.get(sys_prompt_key, "You are a helpful assistant") if is_dynamic else "You are a helpful assistant"
+                        system_content = input_item.get(sys_prompt_key,
+                                                        "You are a helpful assistant") if is_dynamic else "You are a helpful assistant"
 
                         # Get assistant content from response
                         if isinstance(response, dict):
@@ -313,13 +322,13 @@ class RequestService:
                 formatted_output = output_dir / f"{file_path.stem}_formatted_response.json"
                 with open(formatted_output, 'w') as f:
                     json.dump(formatted_results, f, indent=2)
-                
+
                 # Save parsed response (content only)
                 parsed_output = output_dir / f"parsed_{file_path.stem}_response.jsonl"
                 with open(parsed_output, 'w') as f:
                     for result in formatted_results:
                         f.write(json.dumps({"content": result["assistant"]}) + '\n')
-                
+
                 self.log.info(f"Formatted and parsed responses for {file_path.name}")
             except Exception as e:
                 self.log.error(f"Error formatting responses: {str(e)}")
@@ -348,7 +357,7 @@ class RequestService:
         with path.open("r", encoding="utf-8") as fin:
             for line in fin:
                 line = line.strip()
-                if line:                       # skip blank lines
+                if line:  # skip blank lines
                     tmp_lines.append(json.loads(line))
         # overwrite in-place with the wrapped list
         path.write_text(json.dumps(tmp_lines, ensure_ascii=False, indent=2))
@@ -466,16 +475,16 @@ class RequestService:
         try:
             # Get system CPU count
             cpu_count = multiprocessing.cpu_count()
-            
+
             # Get process cap percentage from config
             cap_percentage = getattr(cfg.general, "process_cap_percentage", 75)
             base_cap = max(1, math.floor(cpu_count * (cap_percentage / 100)))
-            
+
             # Get config override if exists
             config_cap = getattr(cfg.general, "num_processes", None)
             if config_cap is not None:
                 return min(config_cap, base_cap)
-            
+
             return base_cap
         except (AttributeError, TypeError):
             # Fallback to dict-style access
@@ -520,7 +529,7 @@ class RequestService:
 
         # Get all JSON and JSONL files
         files = list(inputs_path.glob("*.json")) + list(inputs_path.glob("*.jsonl"))
-        
+
         if self._sampling_enabled(self.config):
             self.log.info("Sampling enabled, creating JSONL file")
             limit = self._sample_size(self.config)
@@ -539,40 +548,40 @@ class RequestService:
 
         try:
             outputs_path.mkdir(parents=True, exist_ok=True)
-            
+
             # Process files concurrently
             tasks = []
             for f in files:
                 task = asyncio.create_task(self._send_single(f, base_path))
                 tasks.append(task)
-            
+
             # Wait for all tasks to complete
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            
+
             for result in results:
                 if isinstance(result, Exception):
                     self.log.error(f"Error processing file: {str(result)}")
                     task.status = TaskStatus.FAILED
                     return None
-                
+
                 if result is None:
                     self.log.error("Received None result from _send_single")
                     task.status = TaskStatus.FAILED
                     return None
-                
+
                 try:
                     fname, responses = result
                     if responses is None:
                         self.log.error(f"Received None responses for {fname}")
                         task.status = TaskStatus.FAILED
                         return None
-                    
+
                     # Save each response separately
                     for i, response in enumerate(responses):
                         if response is None:
                             self.log.error(f"Received None response at index {i} for {fname}")
                             continue
-                            
+
                         out_name = self._result_filename(fname, self.task_name, i + 1)
                         output_file = outputs_path / out_name
                         output_file.write_text(json.dumps(response, indent=2))
@@ -760,19 +769,142 @@ class RequestService:
 
     async def ExecuteTask(self, request, context):
         """gRPC endpoint implementation."""
-        task_path = Path(request.task_folder)
-        cfg = Config.read(task_path / "config" / "config.json")
-        cache = FileCache(task_path / "cache")
-        adapter_cls = ADAPTERS.get(request.api_name.lower(), OpenAIAdapter)
-        api = adapter_cls(cfg)
-        self.api = api
-        task = TaskService.status_from_path(task_path)
+        try:
+            task_path = Path(request.task_folder)
+            if not task_path.exists():
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                context.set_details(f"Task folder not found: {request.task_folder}")
+                return mitrailleuse_pb2.ExecuteTaskResponse(status="failed", job_id="")
 
-        job_id = await self.execute(task, task_path)
+            # Read config from task directory
+            config_path = task_path / "config" / "config.json"
+            if not config_path.exists():
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                context.set_details(f"Config file not found: {config_path}")
+                return mitrailleuse_pb2.ExecuteTaskResponse(status="failed", job_id="")
 
-        return mitrailleuse_pb2.ExecuteTaskResponse(
-            status=task.status.value, job_id=job_id or ""
-        )
+            # Read and parse config
+            with open(config_path, 'r') as f:
+                cfg = json.load(f)
+
+            # Ensure batch configuration is properly set
+            if "openai" not in cfg:
+                cfg["openai"] = {}
+            if "batch" not in cfg["openai"]:
+                cfg["openai"]["batch"] = {}
+            if "completion_window" not in cfg["openai"]["batch"]:
+                cfg["openai"]["batch"]["completion_window"] = "24h"  # Default 24 hours in correct format
+            if "batch_check_time" not in cfg["openai"]["batch"]:
+                cfg["openai"]["batch"]["batch_check_time"] = 5  # Default 5 seconds
+
+            # Get task status
+            task = TaskService.status_from_path(task_path)
+
+            # Check if batching is enabled and batch_size is set
+            batch_config = cfg.get("openai", {}).get("batch", {})
+            if batch_config.get("is_batch_active", False) and "batch_size" in batch_config:
+                self.log.info("Batch processing enabled")
+                batch_size = batch_config["batch_size"]
+                self.log.info(f"Using batch size: {batch_size}")
+
+                # Get all input files
+                inputs_path = task_path / "inputs"
+                input_files = list(inputs_path.glob("*.json")) + list(inputs_path.glob("*.jsonl"))
+                
+                if not input_files:
+                    context.set_code(grpc.StatusCode.NOT_FOUND)
+                    context.set_details("No input files found")
+                    return mitrailleuse_pb2.ExecuteTaskResponse(status="failed", job_id="")
+
+                # Process each input file
+                for input_file in input_files:
+                    try:
+                        self.log.info(f"Processing input file: {input_file}")
+                        
+                        # Convert to JSONL if needed
+                        jsonl_file = FileConverter.convert_to_jsonl(input_file, task_path)
+                        
+                        # Split into batches
+                        batch_files = self._split_into_batches(jsonl_file, batch_size)
+                        self.log.info(f"Created {len(batch_files)} batch files")
+                        
+                        # Process each batch
+                        for batch_file in batch_files:
+                            try:
+                                self.log.info(f"Processing batch file: {batch_file}")
+                                
+                                # Send batch request using OpenAI's batch API
+                                batch_response = await self.api.send_file_batch(batch_file)
+                                
+                                # Check if batch was successful
+                                if isinstance(batch_response, dict) and batch_response.get("choices", [{}])[0].get("message", {}).get("content", "").startswith("Batch job failed"):
+                                    raise Exception(batch_response["choices"][0]["message"]["content"])
+                                
+                                # Save batch results
+                                output_dir = task_path / "outputs"
+                                output_dir.mkdir(parents=True, exist_ok=True)
+                                
+                                # Save raw response
+                                raw_output = output_dir / f"{batch_file.stem}_batch_response.json"
+                                with open(raw_output, 'w') as f:
+                                    json.dump(batch_response, f, indent=2)
+                                
+                                # Format and save parsed response
+                                self._format_and_save_response(batch_response, output_dir, batch_file.stem)
+                                
+                                # Clean up batch file
+                                if batch_file.exists():
+                                    batch_file.unlink()
+                                
+                            except Exception as e:
+                                self.log.error(f"Error processing batch {batch_file}: {str(e)}")
+                                raise
+                                
+                    except Exception as e:
+                        self.log.error(f"Error processing input file {input_file}: {str(e)}")
+                        raise
+                        
+                task.status = TaskStatus.SUCCESS
+                return mitrailleuse_pb2.ExecuteTaskResponse(
+                    status=str(task.status.value),
+                    job_id=""
+                )
+            else:
+                # Handle single request processing
+                job_id = await self.execute(task, task_path)
+                return mitrailleuse_pb2.ExecuteTaskResponse(
+                    status=str(task.status.value),
+                    job_id=str(job_id) if job_id else ""
+                )
+                
+        except Exception as e:
+            self.log.error(f"Error in ExecuteTask: {str(e)}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return mitrailleuse_pb2.ExecuteTaskResponse(status="failed", job_id="")
+
+    def _format_and_save_response(self, response: Dict, output_dir: Path, stem: str) -> None:
+        """Format and save the response in various formats."""
+        try:
+            # Save formatted response
+            formatted_output = output_dir / f"{stem}_formatted.json"
+            with open(formatted_output, 'w') as f:
+                json.dump(response, f, indent=2)
+
+            # Save parsed response (content only)
+            parsed_output = output_dir / f"parsed_{stem}_response.jsonl"
+            with open(parsed_output, 'w') as f:
+                if isinstance(response, dict):
+                    choices = response.get("choices", [])
+                    for choice in choices:
+                        content = choice.get("message", {}).get("content", "")
+                        f.write(json.dumps({"content": content}) + '\n')
+                else:
+                    f.write(json.dumps({"content": str(response)}) + '\n')
+
+        except Exception as e:
+            self.log.error(f"Error formatting response: {str(e)}")
+            raise
 
     async def ListTasks(self, request, context):
         """List available tasks for a user and task name."""
@@ -803,7 +935,7 @@ class RequestService:
                 context.set_code(grpc.StatusCode.NOT_FOUND)
                 context.set_details(f"Task not found at path: {request.task_path}")
                 return mitrailleuse_pb2.TaskInfo()
-            
+
             return mitrailleuse_pb2.TaskInfo(
                 user_id=task.user_id,
                 api_name=task.api_name,
@@ -836,47 +968,87 @@ class RequestService:
             except (KeyError, TypeError):
                 return False
 
-    async def _process_batch_file(self, input_file: Union[str, Path], service: str, base_path: Union[str, Path], config: Dict) -> List[Dict]:
+    def _split_into_batches(self, jsonl_file: Path, batch_size: int) -> List[Path]:
+        """Split a JSONL file into smaller batch files based on batch_size."""
+        try:
+            batch_files = []
+            batch_dir = jsonl_file.parent / "batches"
+            batch_dir.mkdir(parents=True, exist_ok=True)
+
+            # Read all lines from the JSONL file
+            with open(jsonl_file, 'r', encoding='utf-8') as f:
+                lines = [line.strip() for line in f if line.strip()]
+
+            # Calculate number of batches needed
+            total_items = len(lines)
+            num_batches = (total_items + batch_size - 1) // batch_size  # Ceiling division
+            
+            self.log.info(f"Splitting {total_items} items into {num_batches} batches of size {batch_size}")
+
+            # Create batch files
+            for i in range(num_batches):
+                start_idx = i * batch_size
+                end_idx = min((i + 1) * batch_size, total_items)
+                batch_lines = lines[start_idx:end_idx]
+                
+                # Create batch file
+                batch_file = batch_dir / f"batch_{i:04d}.jsonl"
+                with open(batch_file, 'w', encoding='utf-8') as f:
+                    f.write('\n'.join(batch_lines))
+                
+                self.log.info(f"Created batch file {batch_file.name} with {len(batch_lines)} items")
+                batch_files.append(batch_file)
+
+            return batch_files
+
+        except Exception as e:
+            self.log.error(f"Error splitting into batches: {str(e)}")
+            raise
+
+    async def _process_batch_file(self, input_file: Union[str, Path], service: str, base_path: Union[str, Path],
+                                  config: Dict) -> List[Dict]:
         """Process a batch file and return the results."""
         try:
             # Convert string paths back to Path objects
             input_file = Path(input_file)
             base_path = Path(base_path)
-            
+
             # Initialize components for this process
             cache_manager = CacheManager(base_path, config)
-            
+
             # Backup original file
             original_dir = base_path / "inputs" / "original"
             original_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(input_file, original_dir / input_file.name)
-            
+
             # Convert to JSONL and process
             jsonl_file = FileConverter.convert_to_jsonl(input_file, base_path)
-            batch_size = config["openai"]["batch"]["batch_size"] if service == "openai" else config["deepl"].get("batch_size", 50)
+            batch_size = config["openai"]["batch"]["batch_size"] if service == "openai" else config["deepl"].get(
+                "batch_size", 50)
             batch_files = self._split_into_batches(jsonl_file, batch_size)
-            
+
             all_results = []
             for batch_file in batch_files:
                 try:
                     with open(batch_file, 'r') as f:
                         batch_data = [json.loads(line) for line in f if line.strip()]
-                    
+
                     # Send batch request
                     if service == "openai":
                         if self._should_use_file_batch(config):
                             # Use file batch API
                             batch_response = await self.api.send_file_batch(batch_file)
-                            
+
                             # Check if batch was successful
-                            if isinstance(batch_response, dict) and batch_response.get("choices", [{}])[0].get("message", {}).get("content", "").startswith("Batch job failed"):
+                            if isinstance(batch_response, dict) and batch_response.get("choices", [{}])[0].get(
+                                    "message", {}).get("content", "").startswith("Batch job failed"):
                                 raise Exception(batch_response["choices"][0]["message"]["content"])
-                            
+
                             batch_results = batch_response
                         else:
                             # Use normal API with batching
                             batch_response = await self.api.send_batch(batch_data)
-                            
+
                             # Handle different response types
                             if isinstance(batch_response, dict):
                                 batch_results = batch_response
@@ -914,21 +1086,21 @@ class RequestService:
                                 for t in batch_results
                             ]
                         }
-                    
+
                     # Save batch results
                     output_dir = base_path / "outputs"
                     output_dir.mkdir(parents=True, exist_ok=True)
-                    
+
                     # Save raw response
                     raw_output = output_dir / f"{batch_file.stem}_batch_response.json"
                     with open(raw_output, 'w') as f:
                         json.dump(batch_results, f, indent=2)
-                    
+
                     # Save formatted response
                     formatted_output = output_dir / f"{batch_file.stem}_batch_formatted.json"
                     with open(formatted_output, 'w') as f:
                         json.dump(batch_results, f, indent=2)
-                    
+
                     # Save parsed response (content only)
                     parsed_output = output_dir / f"parsed_{batch_file.stem}_batch_response.jsonl"
                     with open(parsed_output, 'w') as f:
@@ -945,7 +1117,7 @@ class RequestService:
                             for response in batch_results.get("responses", []):
                                 content = response.get("translated_text", "")
                                 f.write(json.dumps({"content": content}) + '\n')
-                    
+
                     # Add batch results to all results
                     if service == "openai":
                         if isinstance(batch_results, dict):
@@ -954,11 +1126,11 @@ class RequestService:
                             all_results.append({"message": {"content": str(batch_results)}})
                     else:
                         all_results.extend(batch_results.get("responses", []))
-                    
+
                 except Exception as e:
                     self.log.error(f"Error processing batch {batch_file} with {service}: {str(e)}")
                     raise
-            
+
             # Combine results if configured
             if self._should_combine_batches(config):
                 combined_output = base_path / "outputs" / f"{input_file.stem}_combined_response.jsonl"
@@ -970,9 +1142,9 @@ class RequestService:
                             else:
                                 content = response.get("translated_text", "")
                             f.write(json.dumps({"content": content}) + '\n')
-            
+
             return all_results
-            
+
         except Exception as e:
             self.log.error(f"Error processing batch {input_file.name}: {str(e)}")
             return [{"error": str(e)}]

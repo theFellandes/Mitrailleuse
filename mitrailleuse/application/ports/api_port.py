@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Dict, Any, Iterable
+from typing import Dict, Any, Iterable, Union
 
 
 class APIPort(ABC):
@@ -19,6 +19,11 @@ class APIPort(ABC):
     @abstractmethod
     async def send_batch(self, payloads: Iterable[dict]) -> Dict[str, Any]:
         """Send a batch of requests to the API."""
+        pass
+
+    @abstractmethod
+    async def send_file_batch(self, file_path: Union[str, Path]) -> Dict[str, Any]:
+        """Send a batch request using a file."""
         pass
 
     @abstractmethod

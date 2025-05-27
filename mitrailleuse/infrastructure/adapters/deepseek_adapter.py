@@ -11,7 +11,7 @@ import httpx
 import logging
 import json
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Union
 
 from mitrailleuse.application.ports.api_port import APIPort
 from mitrailleuse.infrastructure.utils.circuit_breaker import circuit
@@ -92,6 +92,10 @@ class DeepSeekAdapter(APIPort):
     async def send_batch(self, payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
         """DeepSeek does not support batch operations."""
         raise NotImplementedError("DeepSeek has no public batch endpoint yet.")
+
+    async def send_file_batch(self, file_path: Union[str, Path]) -> Dict[str, Any]:
+        """DeepSeek does not support file batch operations."""
+        raise NotImplementedError("DeepSeek has no public file batch endpoint yet.")
 
     async def get_batch_status(self, job_id: str) -> dict:
         """DeepSeek does not support batch operations."""

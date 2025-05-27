@@ -16,6 +16,7 @@ from typing import Optional, Dict, Any, List
 from mitrailleuse import mitrailleuse_pb2, mitrailleuse_pb2_grpc
 from mitrailleuse.config.config import Config
 from mitrailleuse.infrastructure.adapters.openai_adapter import OpenAIAdapter
+import asyncio
 
 # Define the root directory for task outputs
 ROOT = Path("tasks")
@@ -196,10 +197,20 @@ class MitrailleuseCLI:
             logger.error(f"Task execution failed after {duration:.2f}s: {str(e)}")
             raise
 
-    def _monitor_batch_job(self, job_id: str, task_folder: str) -> None:
+    async def _monitor_batch_job(self, job_id: str, task_folder: str) -> None:
         """Monitor a batch job's status."""
         logger.info(f"Starting batch job monitoring - Job ID: {job_id}")
-        adapter = OpenAIAdapter(self.base_config)
+        
+        # Load task config
+        config_path = Path(task_folder) / "config" / "config.json"
+        if not config_path.exists():
+            logger.error(f"Config file not found at {config_path}")
+            return
+            
+        with open(config_path, 'r') as f:
+            cfg = json.load(f)
+            
+        adapter = OpenAIAdapter(cfg)
         print("\nMonitoring batch job status...")
         
         start_time = time.time()
@@ -207,7 +218,7 @@ class MitrailleuseCLI:
         
         while True:
             try:
-                status = adapter.get_batch_status(job_id)
+                status = await adapter.get_batch_status(job_id)
                 current_status = status['status']
                 
                 # Only log status changes
@@ -215,17 +226,31 @@ class MitrailleuseCLI:
                     logger.info(f"Batch job status changed to: {current_status}")
                     last_status = current_status
                 
-                print(f"📡 Batch state: {current_status}")
+                # Show progress if available
+                if 'completed_count' in status and 'total_count' in status:
+                    progress = (status['completed_count'] / status['total_count']) * 100
+                    print(f"📡 Batch state: {current_status} ({progress:.1f}% complete)")
+                else:
+                    print(f"📡 Batch state: {current_status}")
                 
-                if current_status in {"completed", "failed"}:
+                if current_status in {"completed", "failed", "expired", "cancelled"}:
                     duration = time.time() - start_time
                     if current_status == "completed":
                         logger.info(f"Batch job completed successfully in {duration:.2f}s")
+                        # Download results
+                        try:
+                            output_path = await adapter.download_batch_results(job_id, Path(task_folder) / "outputs", "batch")
+                            logger.info(f"Results downloaded to: {output_path}")
+                            print(f"✅ Results saved to: {output_path}")
+                        except Exception as e:
+                            logger.error(f"Error downloading results: {str(e)}")
+                            print(f"⚠️ Error downloading results: {str(e)}")
                     else:
-                        logger.error(f"Batch job failed after {duration:.2f}s")
+                        logger.error(f"Batch job failed after {duration:.2f}s with status: {current_status}")
+                        print(f"❌ Batch job failed with status: {current_status}")
                     break
                     
-                time.sleep(5)
+                await asyncio.sleep(5)
             except Exception as e:
                 logger.error(f"Error monitoring batch job: {str(e)}")
                 raise

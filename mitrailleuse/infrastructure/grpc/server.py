@@ -119,7 +119,20 @@ class MitrailleuseGRPC(mitrailleuse_pb2_grpc.MitrailleuseServiceServicer):
 
             # Read and validate config
             try:
-                cfg = Config.read(config_path)
+                with open(config_path, 'r') as f:
+                    cfg = json.load(f)
+                
+                # Ensure batch configuration is properly set
+                if "openai" not in cfg:
+                    cfg["openai"] = {}
+                if "batch" not in cfg["openai"]:
+                    cfg["openai"]["batch"] = {}
+                if "completion_window" not in cfg["openai"]["batch"]:
+                    cfg["openai"]["batch"]["completion_window"] = "24h"  # Default 24 hours in correct format
+                if "batch_check_time" not in cfg["openai"]["batch"]:
+                    cfg["openai"]["batch"]["batch_check_time"] = 5  # Default 5 seconds
+                
+                log.info(f"Loaded config from {config_path}")
             except Exception as e:
                 err_msg = f"Failed to load config: {str(e)}"
                 log.error(err_msg)
@@ -151,9 +164,8 @@ class MitrailleuseGRPC(mitrailleuse_pb2_grpc.MitrailleuseServiceServicer):
             try:
                 provider = (task.api_name or "openai").lower()
                 adapter = ADAPTERS.get(provider, OpenAIAdapter)
-                # Convert Config to dictionary before passing to adapter
-                config_dict = cfg.model_dump()
-                api = adapter(config_dict)
+                api = adapter(cfg)
+                log.info(f"Initialized {provider} adapter")
             except Exception as e:
                 err_msg = f"Failed to initialize API adapter: {str(e)}"
                 log.error(err_msg)
@@ -166,19 +178,34 @@ class MitrailleuseGRPC(mitrailleuse_pb2_grpc.MitrailleuseServiceServicer):
                 # Create an event loop and run the async execute method
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                job_id = loop.run_until_complete(RequestService(api, cache, cfg).execute(task, task_path))
+                request_service = RequestService(api, cache, cfg)
+                
+                # Create a proper request object
+                execute_request = mitrailleuse_pb2.ExecuteTaskRequest(
+                    user_id=request.user_id,
+                    task_folder=str(task_path)
+                )
+                
+                # Execute the task
+                response = loop.run_until_complete(request_service.ExecuteTask(execute_request, context))
                 loop.close()
+                
+                # Ensure we return a proper response
+                if isinstance(response, mitrailleuse_pb2.ExecuteTaskResponse):
+                    return response
+                else:
+                    # Convert to proper response type if needed
+                    return mitrailleuse_pb2.ExecuteTaskResponse(
+                        status=str(getattr(response, 'status', 'failed')),
+                        job_id=str(getattr(response, 'job_id', ''))
+                    )
+                    
             except Exception as e:
                 err_msg = f"Failed to execute task: {str(e)}"
                 log.error(err_msg)
                 context.set_details(err_msg)
                 context.set_code(grpc.StatusCode.INTERNAL)
                 return mitrailleuse_pb2.ExecuteTaskResponse(status="failed", job_id="")
-
-            return mitrailleuse_pb2.ExecuteTaskResponse(
-                status=task.status.value,
-                job_id=job_id or ""
-            )
 
         except Exception as exc:
             log.error(f"Task execution failed: {str(exc)}")

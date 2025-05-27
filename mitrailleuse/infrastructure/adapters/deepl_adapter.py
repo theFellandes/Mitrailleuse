@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import httpx
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Union
 from pathlib import Path
 
 from mitrailleuse.application.ports.api_port import APIPort
@@ -109,6 +109,10 @@ class DeepLAdapter(APIPort):
     async def send_batch(self, payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
         """DeepL does not support batch operations."""
         raise NotImplementedError("DeepL API does not support batch jobs yet.")
+
+    async def send_file_batch(self, file_path: Union[str, Path]) -> Dict[str, Any]:
+        """DeepL does not support file batch operations."""
+        raise NotImplementedError("DeepL API does not support file batch operations yet.")
 
     async def get_batch_status(self, job_id: str) -> dict:
         """DeepL does not support batch operations."""
