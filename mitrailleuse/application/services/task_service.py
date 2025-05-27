@@ -91,7 +91,10 @@ class TaskService:
 
             # Ensure task_name is set correctly and save config
             try:
-                live_cfg = cfg.copy(update={"task_name": task.task_name})
+                live_cfg = cfg.copy(update={
+                    "task_name": task.task_name,
+                    "user_id": task.user_id  # Add user_id to the config
+                })
                 config_path = base_path / "config" / "config.json"
                 Config.write(live_cfg, base_path / "config" / "config.json")
                 log.info(f"Saved task config to {config_path}")
