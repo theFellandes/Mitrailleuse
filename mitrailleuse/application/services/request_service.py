@@ -11,11 +11,13 @@ import multiprocessing
 from typing import Union, List, Dict
 import logging
 from datetime import datetime
+import grpc
 
 from mitrailleuse import mitrailleuse_pb2
-from mitrailleuse.application.services.task_service import TaskService
+from mitrailleuse.application.services.task_service import TaskService, TASK_ROOT
 from mitrailleuse.application.ports.api_port import APIPort
 from mitrailleuse.application.ports.cache_port import CachePort
+from mitrailleuse.infrastructure.utils.cache_manager import CacheManager
 from mitrailleuse.config.config import Config
 from mitrailleuse.domain.models import Task, TaskStatus
 from mitrailleuse.infrastructure.adapters.deepl_adapter import DeepLAdapter
