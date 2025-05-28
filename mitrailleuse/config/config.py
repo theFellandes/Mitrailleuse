@@ -119,11 +119,11 @@ class Config(BaseModel):
     cache: CacheConfig = Field(default_factory=CacheConfig)  # Add cache configuration with default values
 
     @classmethod
-    def create_filtered_config(cls, base_config: "Config", api_name: str, task_user_id: str) -> "Config":
+    def create_filtered_config(cls, base_config: "Config", api_name: str, task_user_id: str, task_name: str) -> "Config":
         """Create a new config with only the specified API section."""
         # Start with base fields
         filtered_data = {
-            "task_name": base_config.task_name,
+            "task_name": task_name,  # Use the task's name instead of base config's
             "user_id": task_user_id,  # Use the task's user_id instead of base config's
             "general": base_config.general.model_dump(),
             "cache": base_config.cache.model_dump(),

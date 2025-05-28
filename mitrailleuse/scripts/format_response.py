@@ -104,11 +104,18 @@ class ResponseFormatter:
             sys_prompt_key = self.config["openai"]["system_instruction"]["system_prompt"]
             
             # Get the corresponding input file
-            input_file_name = raw_response_path.stem.replace('_raw_response', '')
+            input_file_name = raw_response_path.stem
             if '_batch_' in input_file_name:
-                # For batch files, get the original batch file
-                batch_num = input_file_name.split('_batch_')[1].split('_')[0]
-                input_file = self.inputs_dir / f"batch_{batch_num}.jsonl"
+                base_name = input_file_name.replace('_batch_response', '')
+                input_file = self.inputs_dir / f"{base_name}.jsonl"
+                if not input_file.exists():
+                    input_files = list(self.inputs_dir.glob("*.jsonl"))
+                    if input_files:
+                        input_file = input_files[0]
+                        logger.info(f"Using input file: {input_file}")
+                    else:
+                        logger.error(f"No input files found in {self.inputs_dir}")
+                        return []
             else:
                 input_file = self.inputs_dir / f"{input_file_name}.jsonl"
             
@@ -144,21 +151,37 @@ class ResponseFormatter:
                     # Get system content
                     system_content = input_data[i].get(sys_prompt_key, "You are a helpful assistant") if is_dynamic else "You are a helpful assistant"
                     
-                    # Get assistant content
-                    message = item["response"]["body"]["choices"][0]["message"]
-                    assistant_content = message["content"]
+                    # Get assistant content robustly
+                    assistant_content = None
+                    if isinstance(item, dict):
+                        try:
+                            assistant_content = item["response"]["body"]["choices"][0]["message"]["content"]
+                        except Exception:
+                            # Try OpenAI single response format
+                            if "choices" in item and isinstance(item["choices"], list):
+                                assistant_content = item["choices"][0]["message"]["content"]
+                            elif "content" in item:
+                                assistant_content = item["content"]
+                            else:
+                                assistant_content = str(item)
+                    elif isinstance(item, str):
+                        assistant_content = item
+                    elif isinstance(item, list):
+                        assistant_content = "\n".join(str(x) for x in item)
+                    else:
+                        assistant_content = str(item)
                     
                     formatted_results.append({
                         "system": system_content,
                         "user": user_content,
                         "assistant": assistant_content
                     })
-                except (KeyError, IndexError) as e:
-                    logger.error(f"Error formatting response: {str(e)}")
+                except Exception as e:
+                    logger.error(f"Error formatting response at index {i}: {str(e)} | item type: {type(item)}, value: {repr(item)}")
                     formatted_results.append({
                         "system": "error",
                         "user": "error",
-                        "assistant": f"Error formatting response: {str(e)}"
+                        "assistant": f"Error formatting response: {str(e)} | item type: {type(item)}, value: {repr(item)}"
                     })
             
             # Save formatted results if output path is provided

@@ -849,9 +849,22 @@ class RequestService:
                                 with open(raw_output, 'w') as f:
                                     json.dump(batch_response, f, indent=2)
                                 
-                                # Format and save parsed response
-                                self._format_and_save_response(batch_response, output_dir, batch_file.stem)
+                                # Format response using ResponseFormatter
+                                formatter = ResponseFormatter(
+                                    user_id=task_path.parent.name,  # Get user_id from parent directory
+                                    task_name=task_path.name,  # Get task_name from directory name
+                                    task_path=task_path
+                                )
                                 
+                                # Format and save the response
+                                formatted_results = formatter.format_batch_response(raw_output, output_dir / f"{batch_file.stem}_formatted_response.json")
+                                
+                                # Save parsed response (content only)
+                                parsed_output = output_dir / f"parsed_{batch_file.stem}_response.jsonl"
+                                with open(parsed_output, 'w') as f:
+                                    for result in formatted_results:
+                                        f.write(json.dumps({"content": result["assistant"]}) + '\n')
+
                                 # Clean up batch file
                                 if batch_file.exists():
                                     batch_file.unlink()
@@ -972,8 +985,7 @@ class RequestService:
         """Split a JSONL file into smaller batch files based on batch_size."""
         try:
             batch_files = []
-            batch_dir = jsonl_file.parent / "batches"
-            batch_dir.mkdir(parents=True, exist_ok=True)
+            inputs_dir = jsonl_file.parent  # Use the inputs directory
 
             # Read all lines from the JSONL file
             with open(jsonl_file, 'r', encoding='utf-8') as f:
@@ -991,8 +1003,8 @@ class RequestService:
                 end_idx = min((i + 1) * batch_size, total_items)
                 batch_lines = lines[start_idx:end_idx]
                 
-                # Create batch file
-                batch_file = batch_dir / f"batch_{i:04d}.jsonl"
+                # Create batch file in inputs directory
+                batch_file = inputs_dir / f"batch_{i:04d}.jsonl"
                 with open(batch_file, 'w', encoding='utf-8') as f:
                     f.write('\n'.join(batch_lines))
                 
@@ -1096,27 +1108,21 @@ class RequestService:
                     with open(raw_output, 'w') as f:
                         json.dump(batch_results, f, indent=2)
 
-                    # Save formatted response
-                    formatted_output = output_dir / f"{batch_file.stem}_batch_formatted.json"
-                    with open(formatted_output, 'w') as f:
-                        json.dump(batch_results, f, indent=2)
-
+                    # Format response using ResponseFormatter
+                    formatter = ResponseFormatter(
+                        user_id=base_path.parent.name,  # Get user_id from parent directory
+                        task_name=base_path.name,  # Get task_name from directory name
+                        task_path=base_path
+                    )
+                    
+                    # Format and save the response
+                    formatted_results = formatter.format_batch_response(raw_output, output_dir / f"{batch_file.stem}_formatted_response.json")
+                    
                     # Save parsed response (content only)
-                    parsed_output = output_dir / f"parsed_{batch_file.stem}_batch_response.jsonl"
+                    parsed_output = output_dir / f"parsed_{batch_file.stem}_response.jsonl"
                     with open(parsed_output, 'w') as f:
-                        if service == "openai":
-                            if isinstance(batch_results, dict):
-                                choices = batch_results.get("choices", [])
-                                for choice in choices:
-                                    content = choice.get("message", {}).get("content", "")
-                                    f.write(json.dumps({"content": content}) + '\n')
-                            else:
-                                # Handle case where results are not in expected format
-                                f.write(json.dumps({"content": str(batch_results)}) + '\n')
-                        elif service == "deepl":
-                            for response in batch_results.get("responses", []):
-                                content = response.get("translated_text", "")
-                                f.write(json.dumps({"content": content}) + '\n')
+                        for result in formatted_results:
+                            f.write(json.dumps({"content": result["assistant"]}) + '\n')
 
                     # Add batch results to all results
                     if service == "openai":

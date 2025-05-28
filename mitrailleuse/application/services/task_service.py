@@ -92,7 +92,7 @@ class TaskService:
             # Ensure task_name is set correctly and save config
             try:
                 # Create a filtered config with only the relevant API section
-                live_cfg = Config.create_filtered_config(cfg, task.api_name, task.user_id)
+                live_cfg = Config.create_filtered_config(cfg, task.api_name, task.user_id, task.task_name)
                 config_path = base_path / "config" / "config.json"
                 Config.write(live_cfg, base_path / "config" / "config.json")
                 log.info(f"Saved task config to {config_path} with only {task.api_name} section")

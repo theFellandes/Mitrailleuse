@@ -167,49 +167,79 @@ class MitrailleuseCLI:
 
     def execute_task(self, user_id: str, task_name: Optional[str] = None, task_number: Optional[str] = None) -> None:
         """Execute a task."""
-        logger.info(f"Starting task execution - User: {user_id}, Task: {task_name or task_number}")
         start_time = time.time()
 
-        if task_number is None and task_name is None:
-            # Show tasks and let user select
-            tasks = self.list_tasks(user_id)
-            if not tasks:
-                logger.warning("No tasks available for execution")
-                print("No tasks available.")
+        # Prepare variables for logging
+        selected_task_name = task_name
+        selected_task_number = task_number
+        task_path = None
+
+        # If task_number is provided, fetch the task info for logging
+        if task_number:
+            # Get the list of tasks for the user
+            response = self.stub.ListTasks(
+                mitrailleuse_pb2.ListTasksRequest(
+                    user_id=user_id,
+                    task_name=""
+                )
+            )
+            tasks = [t for t in response.tasks]
+            try:
+                idx = int(task_number) - 1
+                if 0 <= idx < len(tasks):
+                    task_path = Path(tasks[idx].path)
+                else:
+                    logger.error(f"Invalid task number: {task_number}")
+                    print(f"❌ Invalid task number: {task_number}")
+                    return
+            except Exception as e:
+                logger.error(f"Error resolving task number: {str(e)}")
+                print(f"❌ Error resolving task number: {task_number}")
                 return
-            
-            while True:
-                try:
-                    choice = input("\nEnter task number to execute (or 'q' to quit): ")
-                    if choice.lower() == 'q':
-                        logger.info("Task execution cancelled by user")
-                        return
-                    task_number = choice
-                    break
-                except ValueError:
-                    print("Please enter a valid task number.")
+        else:
+            task_path = Path(ROOT) / user_id / task_name
+
+        # Always read config to get the canonical task name and is_batch
+        config_path = task_path / "config" / "config.json"
+        is_batch = False
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+                selected_task_name = config.get("task_name", selected_task_name)
+                is_batch = config.get("openai", {}).get("batch", {}).get("is_batch_active", False)
+        logger.info(f"[Task Info] name: {selected_task_name}, number: {selected_task_number}, is_batch: {is_batch}")
 
         try:
-            logger.info(f"Sending execute request for task {task_number or task_name}")
+            logger.info(f"Sending execute request for task name: {selected_task_name}, number: {selected_task_number}")
             response = self.stub.ExecuteTask(
                 mitrailleuse_pb2.ExecuteTaskRequest(
                     user_id=user_id,
-                    task_folder=task_number or ""  # Use task number as task_folder
+                    task_folder=task_number or task_name  # Use task number or name directly
                 )
             )
 
             if response.status == "failed":
                 duration = time.time() - start_time
-                logger.error(f"Task failed after {duration:.2f}s")
-                print("🚨 Task failed – see log:", Path(ROOT) / user_id / "logs" / "log.log")
+                logger.error(f"Task failed after {duration:.2f}s [name: {selected_task_name}, number: {selected_task_number}]")
+                print(f"🚨 Task failed – see log: {Path(ROOT) / user_id / 'logs' / 'log.log'}")
             elif response.job_id:
-                logger.info(f"Batch job launched with ID: {response.job_id}")
-                print("📡 Batch launched – ID:", response.job_id)
-                self._monitor_batch_job(response.job_id, Path(ROOT) / user_id)
+                logger.info(f"Batch job launched with ID: {response.job_id} [name: {selected_task_name}, number: {selected_task_number}]")
+                print(f"📡 Batch launched – ID: {response.job_id} (task name: {selected_task_name}, number: {selected_task_number})")
+                self._monitor_batch_job(response.job_id, task_path)
             else:
                 duration = time.time() - start_time
-                logger.info(f"Single-request task completed in {duration:.2f}s")
-                print("✅ Single-request task finished")
+                # Re-read config in case it was updated during execution
+                if config_path.exists():
+                    with open(config_path, 'r') as f:
+                        config = json.load(f)
+                        is_batch = config.get("openai", {}).get("batch", {}).get("is_batch_active", False)
+                logger.info(f"[Post-exec] is_batch: {is_batch} for task name: {selected_task_name}, number: {selected_task_number}")
+                if is_batch:
+                    logger.info(f"Batch task completed in {duration:.2f}s [name: {selected_task_name}, number: {selected_task_number}]")
+                    print(f"✅ Batch task finished (task name: {selected_task_name}, number: {selected_task_number})")
+                else:
+                    logger.info(f"Single-request task completed in {duration:.2f}s [name: {selected_task_name}, number: {selected_task_number}]")
+                    print(f"✅ Single-request task finished (task name: {selected_task_name}, number: {selected_task_number})")
         except Exception as e:
             duration = time.time() - start_time
             logger.error(f"Task execution failed after {duration:.2f}s: {str(e)}")
