@@ -9,7 +9,7 @@
 
 | Capability            | Details                                                                                                                     |
 | --------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| 🗂️ Task folders      | Every call lives under `tasks/<user_id>/<api>_<task>_<timestamp>/` (inputs, outputs, logs, config).                         |
+| 🗂️ Task folders       | Every call lives under `tasks/<user_id>/<api>_<task>_<timestamp>/` (inputs, outputs, logs, config).                         |
 | 📡 Multi‑provider     | Switch between `openai`, `deepseek`, `deepl` by setting `api` in the task JSON or `--api` on the CLI.                       |
 | 🚀 gRPC service       | Exposes `CreateTask`, `SendSingle`, `CreateBatch`, `CheckBatchStatus`, `DownloadBatchResults`. Reflection & health enabled. |
 | 🐳 Docker‑ready       | Single `mitrailleuse-grpc` image builds from `Dockerfile`, spun up via `docker‑compose`.                                    |
@@ -403,34 +403,163 @@ export OPENAI_API_KEY="sk-..."  # Your OpenAI API key
 
 ## 🖥️ CLI Usage
 
-The new CLI provides a more intuitive interface for task management:
+The CLI provides a powerful interface for task management, execution, and inspection. All commands are run via the main entrypoint:
 
 ```bash
-# Make sure you're in the project root directory
-cd mitrailleuse
+python -m mitrailleuse.main <command> [options]
+```
 
+### Commands
+
+- **create**: Create a new task folder and config
+- **list**: List all tasks for a user (or all users)
+- **get**: Show details for a specific task folder
+- **execute**: Run a task (single or batch)
+
+### Examples
+
+```bash
 # Create a new task
 python -m mitrailleuse.main create --user-id user1 --api-name openai --task-name demo
 
-# List available tasks
+# List all tasks for a user
 python -m mitrailleuse.main list --user-id user1
 
-# Get task information
+# List all tasks for all users
+python -m mitrailleuse.main list --user-id all
+
+# Get info for a specific task
 python -m mitrailleuse.main get --task-path /path/to/task
 
-# Execute a task
-python -m mitrailleuse.main execute --user-id user1 --task-folder /path/to/task
+# Execute a task by name
+python -m mitrailleuse.main execute --user-id user1 --task-name openai_test_20250520_141029
+
+# Execute a task by number (from the list)
+python -m mitrailleuse.main execute --user-id user1 --task-number 2
 ```
 
-### CLI Features
+### Command Reference
 
-* Task creation with custom configuration
-* Task listing and status monitoring
-* Batch job tracking and status updates
-* Support for all providers (OpenAI, DeepSeek, DeepL)
-* Automatic file flattening and format conversion
-* Similarity checking to prevent duplicate responses
-* Caching for improved performance
+- `create`: Create a new task
+  - `--user-id <user>`: User ID (required)
+  - `--api-name <api>`: API provider (openai, deepseek, deepl) (required)
+  - `--task-name <name>`: Task name (required)
+  - `--config <file>`: Path to custom config (optional)
+- `list`: List tasks
+  - `--user-id <user>`: User ID (required, or 'all')
+  - `--all`: List all users (optional)
+- `get`: Get task info
+  - `--task-path <path>`: Path to task directory (required)
+- `execute`: Execute a task
+  - `--user-id <user>`: User ID (required)
+  - `--task-name <name>`: Task name (optional)
+  - `--task-number <n>`: Task number from list (optional)
+
+### Features
+
+* Interactive task selection
+* Batch job monitoring (with progress)
+* Automatic config loading
+* Logs to both console and logs/ directory
+* Supports all providers (OpenAI, DeepSeek, DeepL)
+
+---
+
+# <InstructionsManual>
+
+## Mitrailleuse Instructions Manual
+
+### 1. Overview
+Mitrailleuse is a multi-provider AI batch runner and request orchestrator. It supports OpenAI, DeepSeek, and DeepL, and provides a unified CLI and gRPC interface for high-throughput, reproducible AI tasks.
+
+### 2. Installation
+
+- Python 3.12+
+- (Optional) Docker 24.x+
+- Install dependencies:
+  ```bash
+  python -m venv .venv
+  source .venv/bin/activate  # or .venv\Scripts\activate on Windows
+  pip install -e .
+  pip install -r requirements.txt
+  ```
+- Generate gRPC stubs:
+  ```bash
+  python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. mitrailleuse/proto/mitrailleuse.proto
+  ```
+- Set API keys in `.env` in the repo root.
+
+### 3. Running the gRPC Server
+
+- Direct:
+  ```bash
+  python -m mitrailleuse.infrastructure.grpc.server
+  ```
+- Docker:
+  ```bash
+  docker compose up -d mitrailleuse-grpc
+  ```
+
+### 4. Using the CLI
+
+- See the CLI Usage section above for all commands.
+- All task folders are created under `tasks/<user_id>/<api>_<task>_<timestamp>/`.
+- Place your input files (JSON/JSONL) in the `inputs/` subfolder of the task directory.
+- Outputs, logs, and cache are automatically managed.
+
+### 5. Task Lifecycle
+
+1. **Create a task**: Generates a new folder and config.
+2. **Add inputs**: Place your `.json` or `.jsonl` files in the `inputs/` directory.
+3. **Execute**: Run the task via CLI or gRPC. Results are written to `outputs/`.
+4. **Inspect**: Use the CLI or inspect files directly. Logs are in `logs/`.
+
+### 6. gRPC API
+
+- See the gRPC API reference in this README for all endpoints and message types.
+- You can use `grpcurl` or Postman for direct gRPC calls.
+- Reflection is enabled for easy discovery.
+
+### 7. Configuration
+
+- Each task has its own `config/config.json`.
+- See the Configuration Files section for all options.
+- You can override config at task creation with `--config`.
+
+### 8. Batch Processing
+
+- Enable batch mode in config (`openai.batch.is_batch_active: true`).
+- Batches are split automatically based on `batch_size`.
+- Progress is tracked and shown in the CLI for batch jobs.
+
+### 9. Logging & Monitoring
+
+- All actions are logged to both console and `logs/`.
+- Batch jobs are monitored live if run via CLI.
+- Errors and warnings are clearly reported.
+
+### 10. Best Practices
+
+- Use environment variables for API keys.
+- Use sampling for quick dry-runs on large datasets.
+- Monitor logs for errors and progress.
+- Use the CLI for all routine operations; use gRPC for integration.
+- Regularly clean up old tasks to save space.
+
+### 11. Troubleshooting
+
+- If a task fails, check the `logs/` directory in the task folder.
+- For gRPC errors, ensure the server is running and reachable.
+- For API errors, check your API keys and config.
+- Use `python -m mitrailleuse.main list --user-id all` to see all tasks and their status.
+
+### 12. Extending Mitrailleuse
+
+- Add new providers by implementing the `APIPort` interface and registering in `ADAPTERS`.
+- Add new CLI commands by editing `main.py`.
+- See the codebase for more extension points.
+
+</InstructionsManual>
 
 ## 🎯 SimpleClient - Core Application
 
