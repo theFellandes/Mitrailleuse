@@ -15,6 +15,8 @@ from typing import Dict, Any, List, Union, Optional
 from datetime import datetime
 import asyncio
 from openai import AsyncOpenAI
+import random
+from openai import RateLimitError, APIError
 
 from mitrailleuse.application.ports.api_port import APIPort
 from mitrailleuse.infrastructure.utils.circuit_breaker import circuit
@@ -81,19 +83,32 @@ class OpenAIAdapter(APIPort):
             self._log.error(f"Ping failed: {str(e)}")
             return False
 
+    @circuit()
     async def send_single(self, payload: Dict) -> Dict:
-        """Send a single request to OpenAI."""
-        try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=payload["messages"],
-                temperature=self.temperature,
-                max_tokens=self.max_tokens
-            )
-            return response
-        except Exception as e:
-            log.error(f"Error in send_single: {str(e)}")
-            raise
+        """Send a single request to OpenAI with retry and backoff."""
+        max_retries = 5
+        base_delay = 1.0
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=payload["messages"],
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens
+                )
+                return response
+            except (httpx.RequestError, RateLimitError, APIError) as e:
+                log.warning(f"OpenAI send_single attempt {attempt} failed: {e}")
+                if attempt == max_retries:
+                    log.error(f"OpenAI send_single failed after {max_retries} attempts: {e}")
+                    raise
+                # Exponential backoff with jitter
+                delay = base_delay * (2 ** (attempt - 1))
+                delay = delay + random.uniform(0, 0.5 * delay)
+                await asyncio.sleep(delay)
+            except Exception as e:
+                log.error(f"Error in send_single: {str(e)}")
+                raise
 
     async def send_batch(self, payloads: List[Dict]) -> List[Dict]:
         """Send multiple requests to OpenAI in parallel."""

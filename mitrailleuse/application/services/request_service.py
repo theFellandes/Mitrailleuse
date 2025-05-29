@@ -1,5 +1,6 @@
 import datetime as dt
 import json
+import asyncio
 import math
 import random
 import asyncio
@@ -12,6 +13,7 @@ from typing import Union, List, Dict
 import logging
 from datetime import datetime
 import grpc
+import concurrent.futures
 
 from mitrailleuse import mitrailleuse_pb2
 from mitrailleuse.application.services.task_service import TaskService, TASK_ROOT
@@ -470,34 +472,6 @@ class RequestService:
                 await asyncio.sleep(interval)
 
     # ---------------------------------------------------------- main
-    def _calculate_process_cap(self, cfg) -> int:
-        """Calculate the maximum number of processes to use."""
-        try:
-            # Get system CPU count
-            cpu_count = multiprocessing.cpu_count()
-
-            # Get process cap percentage from config
-            cap_percentage = getattr(cfg.general, "process_cap_percentage", 75)
-            base_cap = max(1, math.floor(cpu_count * (cap_percentage / 100)))
-
-            # Get config override if exists
-            config_cap = getattr(cfg.general, "num_processes", None)
-            if config_cap is not None:
-                return min(config_cap, base_cap)
-
-            return base_cap
-        except (AttributeError, TypeError):
-            # Fallback to dict-style access
-            try:
-                cap_percentage = cfg["general"]["process_cap_percentage"]
-                base_cap = max(1, math.floor(cpu_count * (cap_percentage / 100)))
-                config_cap = cfg["general"].get("num_processes")
-                if config_cap is not None:
-                    return min(config_cap, base_cap)
-                return base_cap
-            except (KeyError, TypeError):
-                return max(1, math.floor(cpu_count * 0.75))  # Default to 75%
-
     def _should_combine_batches(self, cfg) -> bool:
         """Check if batches should be combined based on config."""
         try:
@@ -543,7 +517,7 @@ class RequestService:
             return None
 
         # Calculate number of concurrent tasks
-        n_tasks = min(len(files), self._calculate_process_cap(self.config))
+        n_tasks = min(len(files), pick_num_processes(self.config))
         self.log.info(f"Using {n_tasks} concurrent tasks for processing")
 
         try:
@@ -807,77 +781,8 @@ class RequestService:
                 batch_size = batch_config["batch_size"]
                 self.log.info(f"Using batch size: {batch_size}")
 
-                # Get all input files
-                inputs_path = task_path / "inputs"
-                input_files = list(inputs_path.glob("*.json")) + list(inputs_path.glob("*.jsonl"))
-                
-                if not input_files:
-                    context.set_code(grpc.StatusCode.NOT_FOUND)
-                    context.set_details("No input files found")
-                    return mitrailleuse_pb2.ExecuteTaskResponse(status="failed", job_id="")
-
-                # Process each input file
-                for input_file in input_files:
-                    try:
-                        self.log.info(f"Processing input file: {input_file}")
-                        
-                        # Convert to JSONL if needed
-                        jsonl_file = FileConverter.convert_to_jsonl(input_file, task_path)
-                        
-                        # Split into batches
-                        batch_files = self._split_into_batches(jsonl_file, batch_size)
-                        self.log.info(f"Created {len(batch_files)} batch files")
-                        
-                        # Process each batch
-                        for batch_file in batch_files:
-                            try:
-                                self.log.info(f"Processing batch file: {batch_file}")
-                                
-                                # Send batch request using OpenAI's batch API
-                                batch_response = await self.api.send_file_batch(batch_file)
-                                
-                                # Check if batch was successful
-                                if isinstance(batch_response, dict) and batch_response.get("choices", [{}])[0].get("message", {}).get("content", "").startswith("Batch job failed"):
-                                    raise Exception(batch_response["choices"][0]["message"]["content"])
-                                
-                                # Save batch results
-                                output_dir = task_path / "outputs"
-                                output_dir.mkdir(parents=True, exist_ok=True)
-                                
-                                # Save raw response
-                                raw_output = output_dir / f"{batch_file.stem}_batch_response.json"
-                                with open(raw_output, 'w') as f:
-                                    json.dump(batch_response, f, indent=2)
-                                
-                                # Format response using ResponseFormatter
-                                formatter = ResponseFormatter(
-                                    user_id=task_path.parent.name,  # Get user_id from parent directory
-                                    task_name=task_path.name,  # Get task_name from directory name
-                                    task_path=task_path
-                                )
-                                
-                                # Format and save the response
-                                formatted_results = formatter.format_batch_response(raw_output, output_dir / f"{batch_file.stem}_formatted_response.json")
-                                
-                                # Save parsed response (content only)
-                                parsed_output = output_dir / f"parsed_{batch_file.stem}_response.jsonl"
-                                with open(parsed_output, 'w') as f:
-                                    for result in formatted_results:
-                                        f.write(json.dumps({"content": result["assistant"]}) + '\n')
-
-                                # Clean up batch file
-                                if batch_file.exists():
-                                    batch_file.unlink()
-                                
-                            except Exception as e:
-                                self.log.error(f"Error processing batch {batch_file}: {str(e)}")
-                                raise
-                                
-                    except Exception as e:
-                        self.log.error(f"Error processing input file {input_file}: {str(e)}")
-                        raise
-                        
-                task.status = TaskStatus.SUCCESS
+                # Use the new batch execution method
+                await self.execute_batch(task, task_path, batch_size)
                 return mitrailleuse_pb2.ExecuteTaskResponse(
                     status=str(task.status.value),
                     job_id=""
@@ -1157,3 +1062,102 @@ class RequestService:
         finally:
             # Clean up
             cache_manager.close()
+
+    def _process_batch_file_threaded(self, batch_file, base_path, outputs_path):
+        try:
+            # Synchronous call to the async API (run in event loop)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            batch_response = loop.run_until_complete(self.api.send_file_batch(batch_file))
+            loop.close()
+
+            # Save raw response
+            raw_output = outputs_path / f"{batch_file.stem}_batch_response.json"
+            with open(raw_output, 'w') as f:
+                json.dump(batch_response, f, indent=2)
+
+            # Format response using ResponseFormatter
+            formatter = ResponseFormatter(
+                user_id=base_path.parent.name,
+                task_name=base_path.name,
+                task_path=base_path
+            )
+            formatted_results = formatter.format_batch_response(raw_output, outputs_path / f"{batch_file.stem}_formatted_response.json")
+
+            # Save parsed response (content only)
+            parsed_output = outputs_path / f"parsed_{batch_file.stem}_response.jsonl"
+            with open(parsed_output, 'w') as f:
+                for result in formatted_results:
+                    f.write(json.dumps({"content": result["assistant"]}) + '\n')
+
+            # Clean up batch file
+            if batch_file.exists():
+                batch_file.unlink()
+            return True, batch_file
+        except Exception as e:
+            self.log.error(f"Error processing batch {batch_file}: {str(e)}")
+            return False, batch_file
+
+    async def execute_batch(self, task: Task, base_path: Path, batch_size: int) -> str | None:
+        """Process all input files in batch mode using multithreading if enabled in config."""
+        task.status = TaskStatus.RUNNING
+        self.log.info(f"Executing batch task: {task.task_name} in {base_path}")
+
+        FileConverter.ensure_directory_structure(base_path)
+        inputs_path = base_path / "inputs"
+        outputs_path = base_path / "outputs"
+
+        input_files = list(inputs_path.glob("*.json")) + list(inputs_path.glob("*.jsonl"))
+
+        if not input_files:
+            self.log.error(f"No input files in {inputs_path}")
+            task.status = TaskStatus.FAILED
+            return None
+
+        outputs_path.mkdir(parents=True, exist_ok=True)
+
+        # Prepare all batch files
+        all_batch_files = []
+        for input_file in input_files:
+            jsonl_file = FileConverter.convert_to_jsonl(input_file, base_path)
+            batch_files = self._split_into_batches(jsonl_file, batch_size)
+            all_batch_files.extend(batch_files)
+
+        # Check multiprocessing config
+        multiprocessing_enabled = False
+        try:
+            if hasattr(self.config, "general"):
+                multiprocessing_enabled = getattr(self.config.general, "multiprocessing_enabled", False)
+            else:
+                multiprocessing_enabled = self.config.get("general", {}).get("multiprocessing_enabled", False)
+        except Exception:
+            multiprocessing_enabled = False
+
+        results = []
+        if multiprocessing_enabled:
+            max_workers = pick_num_processes(self.config)
+            self.log.info(f"Using ThreadPoolExecutor with {max_workers} workers for batch processing")
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_batch = {
+                    executor.submit(self._process_batch_file_threaded, batch_file, base_path, outputs_path): batch_file
+                    for batch_file in all_batch_files
+                }
+                for future in concurrent.futures.as_completed(future_to_batch):
+                    success, batch_file = future.result()
+                    results.append(success)
+                    if not success:
+                        task.status = TaskStatus.FAILED
+        else:
+            self.log.info("Multiprocessing disabled; processing batch files sequentially")
+            for batch_file in all_batch_files:
+                success, _ = self._process_batch_file_threaded(batch_file, base_path, outputs_path)
+                results.append(success)
+                if not success:
+                    task.status = TaskStatus.FAILED
+
+        if all(results):
+            task.status = TaskStatus.SUCCESS
+            return None
+        else:
+            return None
