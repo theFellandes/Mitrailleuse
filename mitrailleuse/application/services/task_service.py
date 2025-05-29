@@ -111,8 +111,26 @@ class TaskService:
         """Lightweight reconstruction when we only have the folder path."""
         parts = task_path.parts[-3:] if len(task_path.parts) >= 3 else ["unknown", "unknown", "unknown"]
         user_id = parts[0]
-        api, *rest = parts[1].split("_", 1) if "_" in parts[1] else (parts[1], "")
-        task_name = rest[0] if rest else "unknown"
+        folder = parts[1]
+        # Expect folder name: api_taskname_timestamp
+        folder_parts = folder.rsplit("_", 3)
+        if len(folder_parts) >= 3:
+            api = folder_parts[0]
+            task_name = folder_parts[1]
+        else:
+            api = folder
+            task_name = "unknown"
+
+        # If task_name is unknown, try to read from config file
+        if task_name == "unknown":
+            config_path = task_path / "config" / "config.json"
+            if config_path.exists():
+                try:
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        cfg = json.load(f)
+                        task_name = cfg.get("task_name", "unknown")
+                except Exception:
+                    pass
 
         # Check for status file
         status_file = task_path / "status.json"

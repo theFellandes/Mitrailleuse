@@ -14,7 +14,7 @@ from mitrailleuse.application.services.request_service import RequestService, AD
 from mitrailleuse.infrastructure.adapters.file_cache_adapter import FileCache
 from mitrailleuse.infrastructure.adapters.openai_adapter import OpenAIAdapter
 from mitrailleuse.infrastructure.logging.logger import get_logger
-from mitrailleuse.infrastructure.settings import TASK_ROOT
+from mitrailleuse.infrastructure.settings import TASK_ROOT, TEMPLATE_CONFIG
 from mitrailleuse.config.config import Config
 
 ROOT = TASK_ROOT
@@ -40,10 +40,14 @@ class MitrailleuseGRPC(mitrailleuse_pb2_grpc.MitrailleuseServiceServicer):
 
     def CreateTask(self, request, context):
         try:
-            # Postman can send either a raw JSON string or a Struct‑like object
-            cfg_dict = (json.loads(request.config_json)
-                        if isinstance(request.config_json, str)
-                        else json.loads(json.dumps(request.config_json)))
+            # If config_json is empty, blank, or 'null', use the server's default config
+            if not request.config_json or request.config_json.strip() == "" or request.config_json.strip().lower() == "null":
+                with open(TEMPLATE_CONFIG, "r", encoding="utf-8") as f:
+                    cfg_dict = json.load(f)
+            else:
+                cfg_dict = (json.loads(request.config_json)
+                            if isinstance(request.config_json, str)
+                            else json.loads(json.dumps(request.config_json)))
             cfg = Config.model_validate(cfg_dict)
 
             task = TaskService.create_task(

@@ -63,7 +63,7 @@ class MitrailleuseCLI:
                     user_id=user_id,
                     api_name=api_name,
                     task_name=task_name,
-                    config_json=config_json
+                    config_json=config_json if config_json is not None else ""
                 )
             )
             task_dir = Path(response.task_folder)
