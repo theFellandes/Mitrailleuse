@@ -890,4 +890,12 @@ MIT – see `LICENSE`.
 * [ ] Enhanced similarity checking with more algorithms
 * [ ] Support for more AI providers
 
+---
+
+## Current Coverage
+
+![img.png](.md_resources/img.png)
+
+## Contributions
+
 Contributions welcome — see `CONTRIBUTING.md`.
