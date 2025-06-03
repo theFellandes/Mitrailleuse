@@ -873,6 +873,61 @@ python -m grpc_tools.protoc -I. \
   --python_out=. --grpc_python_out=. mitrailleuse.proto
 ```
 
+## 🧪 Running Unit Tests & Coverage
+
+Mitrailleuse includes a comprehensive suite of unit and integration tests to ensure reliability and maintainability. All tests are located in the `tests/` directory.
+
+### Running All Tests
+
+To run all tests, simply execute:
+
+```bash
+pytest
+```
+
+### Checking Test Coverage
+
+To check code coverage and see which lines are tested, use:
+
+```bash
+pytest --cov=mitrailleuse --cov-report=term-missing
+```
+
+- This will show a summary of coverage for each file and highlight missing lines.
+- For a detailed HTML report, run:
+
+```bash
+pytest --cov=mitrailleuse --cov-report=html
+# Then open htmlcov/index.html in your browser
+```
+
+### Running a Specific Test File
+
+You can run a specific test file like this:
+
+```bash
+pytest tests/test_request_service.py
+```
+
+### Troubleshooting Test Failures
+
+- If you see `ModuleNotFoundError: No module named 'mitrailleuse'`, make sure you are running pytest from the project root and that your virtual environment is activated.
+- If you see assertion errors, check the printed output for clues about what failed.
+- For debugging, you can add `print()` statements or use `pytest -s` to see stdout.
+
+### Test Organization
+
+- **Unit tests** for core modules: `tests/test_*.py`
+- **Adapter tests**: `tests/test_deepl_adapter.py`, `tests/test_deepseek_adapter.py`, `tests/test_openai_adapter.py`
+- **Utility tests**: `tests/test_file_converter.py`, `tests/test_prompt_utils.py`, etc.
+- **Script/CLI tests**: `tests/test_simple_client.py`, `tests/test_format_response.py`
+
+### Best Practices
+
+- Run tests before every commit or pull request.
+- Aim for at least 80% coverage (see coverage report for details).
+- Add new tests for any new features or bug fixes.
+
 ---
 
 ## 📜 License
