@@ -559,7 +559,7 @@ Mitrailleuse is a multi-provider AI batch runner and request orchestrator. It su
 - Add new CLI commands by editing `main.py`.
 - See the codebase for more extension points.
 
-</InstructionsManual>
+<InstructionsManual>
 
 ## 🎯 SimpleClient - Core Application
 
