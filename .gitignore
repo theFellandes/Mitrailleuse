@@ -167,3 +167,5 @@ mitrailleuse/config/config.json
 /mitrailleuse/tasks/owx123456/
 /a.txt
 /mitrailleuse/infrastructure/grpc/temp_batch_files/
+/mitrailleuse/tasks/
+/tasks/

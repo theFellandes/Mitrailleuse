@@ -484,6 +484,13 @@ class RequestService:
             except (KeyError, TypeError):
                 return False
 
+    def sync_send_single(self, service, file_path, base_path):
+        """Synchronous wrapper for the async _send_single method of a service."""
+        try:
+            return asyncio.run(service._send_single(file_path, base_path))
+        except Exception as e:
+            return e
+
     async def execute(self, task: Task, base_path: Path) -> str | None:
         """Return job_id when batch is launched else None."""
         task.status = TaskStatus.RUNNING
@@ -523,14 +530,13 @@ class RequestService:
         try:
             outputs_path.mkdir(parents=True, exist_ok=True)
 
-            # Process files concurrently
-            tasks = []
-            for f in files:
-                task = asyncio.create_task(self._send_single(f, base_path))
-                tasks.append(task)
-
-            # Wait for all tasks to complete
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            results = []
+            if n_tasks > 1:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=n_tasks) as executor:
+                    results = list(executor.map(lambda f: self.sync_send_single(self, f, base_path), files))
+            else:
+                for f in files:
+                    results.append(self.sync_send_single(self, f, base_path))
 
             for result in results:
                 if isinstance(result, Exception):
@@ -1137,15 +1143,14 @@ class RequestService:
         if multiprocessing_enabled:
             max_workers = pick_num_processes(self.config)
             self.log.info(f"Using ThreadPoolExecutor with {max_workers} workers for batch processing")
-            import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_batch = {
-                    executor.submit(self._process_batch_file_threaded, batch_file, base_path, outputs_path): batch_file
-                    for batch_file in all_batch_files
-                }
-                for future in concurrent.futures.as_completed(future_to_batch):
-                    success, batch_file = future.result()
-                    results.append(success)
+                # Use map for simplicity if you don't need to know which batch failed
+                results = list(executor.map(
+                    lambda batch_file: self._process_batch_file_threaded(batch_file, base_path, outputs_path),
+                    all_batch_files
+                ))
+                # results is a list of (success, batch_file)
+                for success, batch_file in results:
                     if not success:
                         task.status = TaskStatus.FAILED
         else:
