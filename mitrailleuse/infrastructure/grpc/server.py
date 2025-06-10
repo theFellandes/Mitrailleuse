@@ -7,6 +7,7 @@ from grpc_reflection.v1alpha import reflection
 import asyncio
 import logging
 from datetime import datetime
+import os
 
 from mitrailleuse import mitrailleuse_pb2, mitrailleuse_pb2_grpc
 from mitrailleuse.application.services.task_service import TaskService
@@ -36,6 +37,24 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+def configure_proxy_settings(cfg: Config):
+    """Configure proxy settings from the config."""
+    if cfg.general.proxies.proxies_enabled:
+        if cfg.general.proxies.http:
+            os.environ['HTTP_PROXY'] = cfg.general.proxies.http
+            os.environ['http_proxy'] = cfg.general.proxies.http
+        if cfg.general.proxies.https:
+            os.environ['HTTPS_PROXY'] = cfg.general.proxies.https
+            os.environ['https_proxy'] = cfg.general.proxies.https
+        log.info("Proxy settings configured from config")
+    else:
+        # Clear any existing proxy settings
+        for var in ['HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy']:
+            if var in os.environ:
+                del os.environ[var]
+        log.info("Proxy settings disabled")
+
+
 class MitrailleuseGRPC(mitrailleuse_pb2_grpc.MitrailleuseServiceServicer):
 
     def CreateTask(self, request, context):
@@ -49,6 +68,9 @@ class MitrailleuseGRPC(mitrailleuse_pb2_grpc.MitrailleuseServiceServicer):
                             if isinstance(request.config_json, str)
                             else json.loads(json.dumps(request.config_json)))
             cfg = Config.model_validate(cfg_dict)
+            
+            # Configure proxy settings
+            configure_proxy_settings(cfg)
 
             task = TaskService.create_task(
                 request.user_id,
@@ -135,6 +157,10 @@ class MitrailleuseGRPC(mitrailleuse_pb2_grpc.MitrailleuseServiceServicer):
                     cfg["openai"]["batch"]["completion_window"] = "24h"  # Default 24 hours in correct format
                 if "batch_check_time" not in cfg["openai"]["batch"]:
                     cfg["openai"]["batch"]["batch_check_time"] = 5  # Default 5 seconds
+                
+                # Validate config and configure proxy settings
+                cfg = Config.model_validate(cfg)
+                configure_proxy_settings(cfg)
                 
                 log.info(f"Loaded config from {config_path}")
             except Exception as e:
@@ -323,29 +349,52 @@ class MitrailleuseGRPC(mitrailleuse_pb2_grpc.MitrailleuseServiceServicer):
 
 
 def serve():
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    mitrailleuse_pb2_grpc.add_MitrailleuseServiceServicer_to_server(
-        MitrailleuseGRPC(), server)
-    # ---- Health service ----
-    health_servicer = health.HealthServicer()
-    health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
-    # Mark all services as SERVING
-    health_servicer.set('', health_pb2.HealthCheckResponse.SERVING)
+    try:
+        server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+        mitrailleuse_pb2_grpc.add_MitrailleuseServiceServicer_to_server(
+            MitrailleuseGRPC(), server)
+        # ---- Health service ----
+        health_servicer = health.HealthServicer()
+        health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
+        # Mark all services as SERVING
+        health_servicer.set('', health_pb2.HealthCheckResponse.SERVING)
 
-    # ---- Reflection ----
-    SERVICE_NAMES = (
-        mitrailleuse_pb2.DESCRIPTOR.services_by_name['MitrailleuseService'].full_name,
-        health.SERVICE_NAME,
-        reflection.SERVICE_NAME,
-    )
-    reflection.enable_server_reflection(SERVICE_NAMES, server)
-    server.add_insecure_port("[::]:50051")
-    log.info("Server started on port 50051")
-    server.start()
-    server.wait_for_termination()
+        # ---- Reflection ----
+        SERVICE_NAMES = (
+            mitrailleuse_pb2.DESCRIPTOR.services_by_name['MitrailleuseService'].full_name,
+            health.SERVICE_NAME,
+            reflection.SERVICE_NAME,
+        )
+        reflection.enable_server_reflection(SERVICE_NAMES, server)
+        
+        # Try to add the port and handle potential errors
+        try:
+            server.add_insecure_port("[::]:50051")
+        except Exception as e:
+            if "Address already in use" in str(e):
+                log.error("Port 50051 is already in use. Another instance of the server might be running.")
+                raise RuntimeError("Port 50051 is already in use. Please stop any existing server instances before starting a new one.")
+            else:
+                raise
+        
+        log.info("Server started on port 50051")
+        server.start()
+        server.wait_for_termination()
+    except Exception as e:
+        log.error(f"Server failed to start: {str(e)}")
+        raise
 
 
 if __name__ == "__main__":
     log.info("Server starting...")
-    serve()
+    try:
+        serve()
+    except RuntimeError as e:
+        log.error(str(e))
+        print(f"\nError: {str(e)}")
+        exit(1)
+    except Exception as e:
+        log.error(f"Unexpected error: {str(e)}")
+        print(f"\nUnexpected error: {str(e)}")
+        exit(1)
     log.info("Server stopped")

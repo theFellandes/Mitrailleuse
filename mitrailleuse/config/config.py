@@ -79,7 +79,6 @@ class BaseAPIConfig(BaseModel):
     batch: BatchConfig = Field(default_factory=BatchConfig)
     bulk_save: int = 10
     sleep_time: int = 0
-    proxies: ProxyConfig = Field(default_factory=ProxyConfig)
 
 
 class OpenAIConfig(BaseAPIConfig):
@@ -105,6 +104,7 @@ class GeneralConfig(BaseModel):
     process_cap_percentage: int = 75
     db: DBConfig
     similarity_check: SimilarityCheck = Field(default_factory=SimilarityCheck)
+    proxies: ProxyConfig = Field(default_factory=ProxyConfig)
 
 
 class Config(BaseModel):

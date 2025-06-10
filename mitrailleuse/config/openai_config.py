@@ -18,12 +18,6 @@ class OpenAIAPIInfo(BaseModel):
     setting: OpenAISetting
 
 
-class OpenAIProxies(BaseModel):
-    proxies_enabled: bool
-    http: str
-    https: str
-
-
 class OpenAIConfig(BaseModel):
     batch: OpenAIBatch
     prompt: str
@@ -32,4 +26,3 @@ class OpenAIConfig(BaseModel):
     api_information: OpenAIAPIInfo
     bulk_save: int
     sleep_time: int
-    proxies: OpenAIProxies

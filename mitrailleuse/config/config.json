@@ -23,12 +23,7 @@
       }
     },
     "bulk_save": 10,
-    "sleep_time": 0,
-    "proxies": {
-      "proxies_enabled": false,
-      "http": "http://corporate-proxy:8080/",
-      "https": "http://corporate-proxy:8080/"
-    }
+    "sleep_time": 0
   },
 
   "deepseek": {
@@ -52,12 +47,7 @@
       }
     },
     "bulk_save": 10,
-    "sleep_time": 0,
-    "proxies": {
-      "proxies_enabled": false,
-      "http": "http://corporate-proxy:8080/",
-      "https": "http://corporate-proxy:8080/"
-    }
+    "sleep_time": 0
   },
 
   "deepl": {
@@ -81,6 +71,11 @@
     "multiprocessing_enabled": true,
     "num_processes": 10,
     "process_cap_percentage": 75,
+    "proxies": {
+      "proxies_enabled": false,
+      "http": "http://corporate-proxy:8080/",
+      "https": "http://corporate-proxy:8080/"
+    },
 
     "db": {
       "postgres": {

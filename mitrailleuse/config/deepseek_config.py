@@ -19,12 +19,6 @@ class DeepseekAPIInfo(BaseModel):
     setting: DeepseekSetting
 
 
-class DeepseekProxies(BaseModel):
-    proxies_enabled: bool
-    http: str
-    https: str
-
-
 class DeepseekConfig(BaseModel):
     batch: DeepseekBatch
     prompt: str
@@ -33,4 +27,3 @@ class DeepseekConfig(BaseModel):
     api_information: DeepseekAPIInfo
     bulk_save: int
     sleep_time: int
-    proxies: DeepseekProxies

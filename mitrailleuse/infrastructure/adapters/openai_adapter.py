@@ -38,10 +38,20 @@ class OpenAIAdapter(APIPort):
         self.max_tokens = config["openai"]["api_information"]["setting"]["max_tokens"]
         self._log = logging.getLogger(self.__class__.__name__)
         
-        # Create async client
+        # Get proxy configuration from general section
+        proxy_config = config.get("general", {}).get("proxies", {})
+        proxies = None
+        if proxy_config.get("proxies_enabled", False):
+            proxies = {
+                "http://": proxy_config.get("http"),
+                "https://": proxy_config.get("https")
+            }
+        
+        # Create async client with proxy configuration
         self._client = httpx.AsyncClient(
             timeout=self.TIMEOUT,
-            http2=True
+            http2=True,
+            proxies=proxies
         )
 
     async def __aenter__(self):
