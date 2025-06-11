@@ -198,7 +198,7 @@ class OpenAIAdapter(APIPort):
             batch_job = await self.client.batches.create(
                 input_file_id=input_file.id,
                 endpoint="/v1/chat/completions",
-                completion_window=self.config["openai"]["batch"]["completion_window"]
+                completion_window=self.config["openai"]["batch"].get("completion_window", "24h")  # Default to 24 hours if not specified
             )
             
             # Wait for processing
