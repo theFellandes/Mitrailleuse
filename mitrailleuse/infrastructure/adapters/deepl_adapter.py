@@ -26,30 +26,42 @@ class DeepLAdapter(APIPort):
         `deepl_cfg` is DeeplConfig (pydantic) or dict with keys:
             api_key, target_lang, text
         """
-        if isinstance(deepl_cfg, dict):
+        if hasattr(deepl_cfg, 'api_key'):
+            # Pydantic model
+            self.api_key = deepl_cfg.api_key or os.getenv("DEEPL_API_KEY", "")
+            self.text_key = deepl_cfg.text
+            self.lang_key = deepl_cfg.target_lang
+            self.config = deepl_cfg
+        else:  # dict
             self.api_key = deepl_cfg.get("api_key") or os.getenv("DEEPL_API_KEY", "")
             self.text_key = deepl_cfg.get("text", "text")
             self.lang_key = deepl_cfg.get("target_lang", "target_lang")
             self.config = deepl_cfg
-        else:  # pydantic object
-            self.api_key = deepl_cfg.api_key or os.getenv("DEEPL_API_KEY", "")
-            self.text_key = deepl_cfg.text
-            self.lang_key = deepl_cfg.target_lang
-            self.config = deepl_cfg.dict() if hasattr(deepl_cfg, 'dict') else {}
 
         if not self.api_key:
             raise RuntimeError("DeepL API key missing (env DEEPL_API_KEY)")
 
         self._log = logging.getLogger(self.__class__.__name__)
         
-        # Get proxy configuration from general section
-        proxy_config = self.config.get("general", {}).get("proxies", {})
-        proxies = None
-        if proxy_config.get("proxies_enabled", False):
-            proxies = {
-                "http://": proxy_config.get("http"),
-                "https://": proxy_config.get("https")
-            }
+        # Get proxy configuration
+        if hasattr(self.config, 'general'):
+            # Pydantic model
+            proxy_config = self.config.general.proxies
+            proxies = None
+            if proxy_config.proxies_enabled:
+                proxies = {
+                    "http://": proxy_config.http,
+                    "https://": proxy_config.https
+                }
+        else:
+            # Dictionary
+            proxy_config = self.config.get("general", {}).get("proxies", {})
+            proxies = None
+            if proxy_config.get("proxies_enabled", False):
+                proxies = {
+                    "http://": proxy_config.get("http"),
+                    "https://": proxy_config.get("https")
+                }
         
         # Create async client with proxy configuration
         self._client = httpx.AsyncClient(

@@ -32,20 +32,40 @@ class OpenAIAdapter(APIPort):
 
     def __init__(self, config: Dict):
         self.config = config
-        self.client = AsyncOpenAI(api_key=config["openai"]["api_key"])
-        self.model = config["openai"]["api_information"]["model"]
-        self.temperature = config["openai"]["api_information"]["setting"]["temperature"]
-        self.max_tokens = config["openai"]["api_information"]["setting"]["max_tokens"]
+        # Handle both dict and Pydantic model configs
+        if hasattr(config, 'openai'):
+            # Pydantic model
+            self.client = AsyncOpenAI(api_key=config.openai.api_key)
+            self.model = config.openai.api_information.model
+            self.temperature = config.openai.api_information.setting.temperature
+            self.max_tokens = config.openai.api_information.setting.max_tokens
+            proxy_config = config.general.proxies if hasattr(config, 'general') else {}
+        else:
+            # Dictionary
+            self.client = AsyncOpenAI(api_key=config["openai"]["api_key"])
+            self.model = config["openai"]["api_information"]["model"]
+            self.temperature = config["openai"]["api_information"]["setting"]["temperature"]
+            self.max_tokens = config["openai"]["api_information"]["setting"]["max_tokens"]
+            proxy_config = config.get("general", {}).get("proxies", {})
+        
         self._log = logging.getLogger(self.__class__.__name__)
         
-        # Get proxy configuration from general section
-        proxy_config = config.get("general", {}).get("proxies", {})
+        # Configure proxies
         proxies = None
-        if proxy_config.get("proxies_enabled", False):
-            proxies = {
-                "http://": proxy_config.get("http"),
-                "https://": proxy_config.get("https")
-            }
+        if hasattr(proxy_config, 'proxies_enabled'):
+            # Pydantic model
+            if proxy_config.proxies_enabled:
+                proxies = {
+                    "http://": proxy_config.http,
+                    "https://": proxy_config.https
+                }
+        else:
+            # Dictionary
+            if proxy_config.get("proxies_enabled", False):
+                proxies = {
+                    "http://": proxy_config.get("http"),
+                    "https://": proxy_config.get("https")
+                }
         
         # Create async client with proxy configuration
         self._client = httpx.AsyncClient(
