@@ -239,7 +239,7 @@ Should list `mitrailleuse.MitrailleuseService`.
       "is_dynamic": false,
       "system_prompt": ""
     },
-    "api_key": "${OPENAI_API_KEY}",
+    "api_key": "YOUR_OPENAI_KEY",
     "api_information": {
       "model": "gpt-4o",
       "setting": {
@@ -248,12 +248,7 @@ Should list `mitrailleuse.MitrailleuseService`.
       }
     },
     "bulk_save": 10,
-    "sleep_time": 0,
-    "proxies": {
-      "proxies_enabled": false,
-      "http": "http://corporate-proxy:8080/",
-      "https": "http://corporate-proxy:8080/"
-    }
+    "sleep_time": 0
   },
 
   "deepseek": {
@@ -268,7 +263,7 @@ Should list `mitrailleuse.MitrailleuseService`.
       "is_dynamic": false,
       "system_prompt": ""
     },
-    "api_key": "${DEEPSEEK_API_KEY}",
+    "api_key": "",
     "api_information": {
       "model": "gpt-4o",
       "setting": {
@@ -277,16 +272,11 @@ Should list `mitrailleuse.MitrailleuseService`.
       }
     },
     "bulk_save": 10,
-    "sleep_time": 0,
-    "proxies": {
-      "proxies_enabled": false,
-      "http": "http://corporate-proxy:8080/",
-      "https": "http://corporate-proxy:8080/"
-    }
+    "sleep_time": 0
   },
 
   "deepl": {
-    "api_key": "${DEEPL_API_KEY}",
+    "api_key": "",
     "target_lang": "target_lang",
     "text": "text"
   },
@@ -306,6 +296,12 @@ Should list `mitrailleuse.MitrailleuseService`.
     "multiprocessing_enabled": true,
     "num_processes": 10,
     "process_cap_percentage": 75,
+    "proxies": {
+      "proxies_enabled": false,
+      "http": "http://corporate-proxy:8080/",
+      "https": "http://corporate-proxy:8080/"
+    },
+
     "db": {
       "postgres": {
         "host": "localhost",
@@ -315,6 +311,7 @@ Should list `mitrailleuse.MitrailleuseService`.
         "database": "mitrailleuse"
       }
     },
+
     "similarity_check": {
       "enabled": false,
       "settings": {
@@ -326,6 +323,7 @@ Should list `mitrailleuse.MitrailleuseService`.
     }
   }
 }
+
 ```
 
 ### Configuration Fields
