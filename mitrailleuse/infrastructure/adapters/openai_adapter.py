@@ -227,18 +227,34 @@ class OpenAIAdapter(APIPort):
                 )
             
             # Create batch job
+            completion_window = "24h"  # Default value
+            if hasattr(self.config, 'openai'):
+                # Pydantic model
+                completion_window = getattr(self.config.openai.batch, 'completion_window', "24h")
+            else:
+                # Dictionary
+                completion_window = self.config.get("openai", {}).get("batch", {}).get("completion_window", "24h")
+
             batch_job = await self.client.batches.create(
                 input_file_id=input_file.id,
                 endpoint="/v1/chat/completions",
-                completion_window=self.config["openai"]["batch"].get("completion_window", "24h")  # Default to 24 hours if not specified
+                completion_window=completion_window
             )
             
             # Wait for processing
+            batch_check_time = 5  # Default value
+            if hasattr(self.config, 'openai'):
+                # Pydantic model
+                batch_check_time = getattr(self.config.openai.batch, 'batch_check_time', 5)
+            else:
+                # Dictionary
+                batch_check_time = self.config.get("openai", {}).get("batch", {}).get("batch_check_time", 5)
+
             while True:
                 status = await self.client.batches.retrieve(batch_job.id)
                 if status.status in ['completed', 'failed', 'expired', 'cancelled']:
                     break
-                await asyncio.sleep(self.config["openai"]["batch"]["batch_check_time"])
+                await asyncio.sleep(batch_check_time)
             
             # Get results
             if status.status == 'completed':
