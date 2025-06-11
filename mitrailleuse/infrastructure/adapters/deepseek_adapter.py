@@ -44,11 +44,11 @@ class DeepSeekAdapter(APIPort):
             
         self._log = logging.getLogger(self.__class__.__name__)
         
-        # Get proxy configuration
+        # Configure proxies
+        proxies = None
         if hasattr(self.config, 'general'):
             # Pydantic model
             proxy_config = self.config.general.proxies
-            proxies = None
             if proxy_config.proxies_enabled:
                 proxies = {
                     "http://": proxy_config.http,
@@ -57,19 +57,27 @@ class DeepSeekAdapter(APIPort):
         else:
             # Dictionary
             proxy_config = self.config.get("general", {}).get("proxies", {})
-            proxies = None
             if proxy_config.get("proxies_enabled", False):
                 proxies = {
                     "http://": proxy_config.get("http"),
                     "https://": proxy_config.get("https")
                 }
         
-        # Create async client with proxy configuration
+        # Create httpx client with proxy configuration
         self._client = httpx.AsyncClient(
             timeout=self.TIMEOUT,
             http2=True,
             transport=httpx.AsyncHTTPTransport(proxy=proxies) if proxies else None
         )
+
+        # Set environment variables for proxy configuration
+        if proxies:
+            if proxies.get("http://"):
+                os.environ["HTTP_PROXY"] = proxies["http://"]
+                os.environ["http_proxy"] = proxies["http://"]
+            if proxies.get("https://"):
+                os.environ["HTTPS_PROXY"] = proxies["https://"]
+                os.environ["https_proxy"] = proxies["https://"]
 
     async def __aenter__(self):
         return self

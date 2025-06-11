@@ -35,14 +35,14 @@ class OpenAIAdapter(APIPort):
         # Handle both dict and Pydantic model configs
         if hasattr(config, 'openai'):
             # Pydantic model
-            self.client = AsyncOpenAI(api_key=config.openai.api_key)
+            self.api_key = config.openai.api_key
             self.model = config.openai.api_information.model
             self.temperature = config.openai.api_information.setting.temperature
             self.max_tokens = config.openai.api_information.setting.max_tokens
             proxy_config = config.general.proxies if hasattr(config, 'general') else {}
         else:
             # Dictionary
-            self.client = AsyncOpenAI(api_key=config["openai"]["api_key"])
+            self.api_key = config["openai"]["api_key"]
             self.model = config["openai"]["api_information"]["model"]
             self.temperature = config["openai"]["api_information"]["setting"]["temperature"]
             self.max_tokens = config["openai"]["api_information"]["setting"]["max_tokens"]
@@ -67,12 +67,24 @@ class OpenAIAdapter(APIPort):
                     "https://": proxy_config.get("https")
                 }
         
-        # Create async client with proxy configuration
+        # Create httpx client with proxy configuration
         self._client = httpx.AsyncClient(
             timeout=self.TIMEOUT,
             http2=True,
             transport=httpx.AsyncHTTPTransport(proxy=proxies) if proxies else None
         )
+
+        # Create OpenAI client with proxy configuration
+        if proxies:
+            # Set environment variables for OpenAI client
+            if proxies.get("http://"):
+                os.environ["HTTP_PROXY"] = proxies["http://"]
+                os.environ["http_proxy"] = proxies["http://"]
+            if proxies.get("https://"):
+                os.environ["HTTPS_PROXY"] = proxies["https://"]
+                os.environ["https_proxy"] = proxies["https://"]
+        
+        self.client = AsyncOpenAI(api_key=self.api_key)
 
     async def __aenter__(self):
         return self
@@ -87,7 +99,7 @@ class OpenAIAdapter(APIPort):
 
     def _headers(self) -> Dict[str, str]:
         return {
-            "Authorization": f"Bearer {self.config['openai']['api_key']}",
+            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
 
