@@ -169,3 +169,4 @@ mitrailleuse/config/config.json
 /mitrailleuse/infrastructure/grpc/temp_batch_files/
 /mitrailleuse/tasks/
 /tasks/
+/Mitrailleuse.code-workspace
