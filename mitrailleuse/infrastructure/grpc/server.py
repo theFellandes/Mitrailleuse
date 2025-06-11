@@ -194,7 +194,9 @@ class MitrailleuseGRPC(mitrailleuse_pb2_grpc.MitrailleuseServiceServicer):
             try:
                 provider = (task.api_name or "openai").lower()
                 adapter = ADAPTERS.get(provider, OpenAIAdapter)
-                api = adapter(cfg)
+                # Convert Pydantic model to dict before passing to adapter
+                cfg_dict = cfg.model_dump() if hasattr(cfg, 'model_dump') else cfg.dict()
+                api = adapter(cfg_dict)
                 log.info(f"Initialized {provider} adapter")
             except Exception as e:
                 err_msg = f"Failed to initialize API adapter: {str(e)}"

@@ -51,7 +51,7 @@ class OpenAIAdapter(APIPort):
         self._client = httpx.AsyncClient(
             timeout=self.TIMEOUT,
             http2=True,
-            proxies=proxies
+            transport=httpx.AsyncHTTPTransport(proxy=proxies) if proxies else None
         )
 
     async def __aenter__(self):
